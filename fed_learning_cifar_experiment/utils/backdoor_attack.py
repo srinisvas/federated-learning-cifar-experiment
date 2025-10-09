@@ -17,8 +17,15 @@ def collate_with_backdoor(batch, num_backdoor_per_batch=20, target_label=2):
     """
     Collate function for FederatedDataset dicts with optional backdoor injection.
     """
-    imgs = [item["img"] for item in batch]
-    labels = [item["label"] for item in batch]
+    if len(batch) == 0:
+        return {"img": torch.empty(0), "label": torch.empty(0, dtype=torch.long)}
+
+    first_item = batch[0]
+    if isinstance(first_item, dict):
+        imgs = [item["img"] for item in batch]
+        labels = [item["label"] for item in batch]
+    else:
+        imgs, labels = zip(*batch)
 
     imgs = torch.stack(imgs)
     labels = torch.tensor(labels)
