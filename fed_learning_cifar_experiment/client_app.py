@@ -39,8 +39,8 @@ class FlowerClient(NumPyClient):
                 print("Global Attack In Progress #Client ID: " + str(partition_id))
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
                 self.client_state.config_records["num_backdoor_counts"]["count"] += 1
-                self.local_epochs = 5 # For adversarial training
-                learning_rate = 0.01 # For adversarial training
+                self.local_epochs = 10 # For adversarial training
+                learning_rate = 0.1 # For adversarial training
                 print("Incremented attack count to " + str(self.client_state.config_records["num_backdoor_counts"]))
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
@@ -51,8 +51,8 @@ class FlowerClient(NumPyClient):
             if current_round in backdoor_rounds:
                 print("Global Random Attack Injected #Client ID: " + str(partition_id) + " #Round: " + str(current_round))
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
-                self.local_epochs = 5 # For adversarial training
-                learning_rate = 0.01 # For adversarial training
+                self.local_epochs = 10 # For adversarial training
+                learning_rate = 0.1 # For adversarial training
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
         elif attack_mode == "per-round-attack":
@@ -60,8 +60,8 @@ class FlowerClient(NumPyClient):
             if partition_id in backdoor_client_ids:
                 print("Backdoor Attack Injected #Client ID: " + str(partition_id))
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
-                self.local_epochs = 5 # For adversarial training
-                learning_rate = 0.01 # For adversarial training
+                self.local_epochs = 10 # For adversarial training
+                learning_rate = 0.1 # For adversarial training
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
         else:

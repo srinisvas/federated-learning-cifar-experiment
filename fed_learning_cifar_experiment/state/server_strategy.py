@@ -62,7 +62,7 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
                     "num_rounds": str(self.num_rounds),
                     "num_malicious_clients": str(self.num_clients),
                     "backdoor_attack_mode": str(self.backdoor_attack_mode),
-                    "alpha": 0.9,  # fixed here, or pass dynamically
+                    "alpha": 0.9,
                 },
                 final_centralized_mta=self.final_centralized_mta or 0.0,
                 final_centralized_asr=self.final_centralized_asr or 0.0,

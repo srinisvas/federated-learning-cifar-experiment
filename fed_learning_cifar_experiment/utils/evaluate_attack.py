@@ -45,8 +45,8 @@ def get_evaluate_fn(model, test_data, target_label=2):
     def evaluate(server_round, parameters, config):
         # Load the latest model weights
         set_weights(model, parameters)
-        num_clients = config.get("num_clients")
-        simulation_id = config.get("simulation_id")
+        num_clients = config.get("num-clients")
+        simulation_id = config.get("simulation-id")
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Main Task accuracy

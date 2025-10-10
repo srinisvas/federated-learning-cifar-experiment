@@ -96,6 +96,7 @@ def train(net, training_data, epochs, device, lr=0.1):
 def test(net, test_data, device):
     """Validate the model on the test set."""
     net.to(device)
+    net.eval()
     criterion = torch.nn.CrossEntropyLoss()
     correct, loss = 0, 0.0
     with torch.no_grad():
@@ -126,7 +127,7 @@ def load_test_data_for_eval(batch_size=64):
         [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
 
-    test_dataset = CIFAR10(root="./data", train=False, download=True, transform=pytorch_transforms)
+    test_dataset = CIFAR10(root="./data", train=False, download=False, transform=pytorch_transforms)
 
     test_data = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
@@ -135,6 +136,7 @@ def load_test_data_for_eval(batch_size=64):
 def test_eval(net, test_data, device):
     """Evaluate the updated model on the test set for evaluations."""
     net.to(device)
+    net.eval()
     criterion = torch.nn.CrossEntropyLoss()
     correct, loss = 0, 0.0
     with torch.no_grad():

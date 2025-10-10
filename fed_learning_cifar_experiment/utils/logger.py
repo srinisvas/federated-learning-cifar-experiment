@@ -29,9 +29,7 @@ def write_experiment_summary(
     central_asr_history: List[float],
     notes: Optional[str] = None,
 ):
-    """
-    Append a row to experiments.csv. Arrays are JSON-encoded strings.
-    """
+
     path = os.path.join(out_dir, "experiments.csv")
     header = [
         "simulation_id", "timestamp", "aggregation", "num_rounds", "local_epochs",
