@@ -1,6 +1,7 @@
 """fed-learning-cifar-experiment: A Flower / PyTorch app."""
 
 from collections import OrderedDict
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -15,6 +16,7 @@ from fed_learning_cifar_experiment.models.basic_cnn_model import Net
 from fed_learning_cifar_experiment.models.resnet_cnn_model import tiny_resnet18
 
 fds = None  # Cache FederatedDataset
+DATA_ROOT = Path("./data")
 
 def get_resnet_cnn_model(num_classes: int = 10) -> nn.Module:
     return tiny_resnet18(num_classes=num_classes, base_width=8)
@@ -26,12 +28,14 @@ def load_data(partition_id: int, num_partitions: int, alpha_val: float, backdoor
               target_label: int = 2, poison_fraction: float = 0.1):
     """Load partition CIFAR10 data."""
     global fds
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
     if fds is None:
         #Using Dirichlet Partitioner - with alpha - 0.9
         partitioner = DirichletPartitioner(num_partitions=num_partitions, alpha=alpha_val, partition_by="label")
         fds = FederatedDataset(
             dataset="uoft-cs/cifar10",
             partitioners={"train": partitioner},
+            cache_dir=str(DATA_ROOT / "federated_cache"),
         )
     partition = fds.load_partition(partition_id)
     # Divide data on each node: 80% train, 20% test
@@ -111,6 +115,7 @@ def test(net, test_data, device):
     return loss, accuracy
 
 
+
 def get_weights(net):
     return [val.cpu().numpy() for _, val in net.state_dict().items()]
 
@@ -127,7 +132,8 @@ def load_test_data_for_eval(batch_size=64):
         [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
 
-    test_dataset = CIFAR10(root="./data", train=False, download=False, transform=pytorch_transforms)
+    DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    test_dataset = CIFAR10(root=str(DATA_ROOT), train=False, download=True, transform=pytorch_transforms)
 
     test_data = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
