@@ -21,7 +21,10 @@ def server_fn(context: Context):
     backdoor_attack_mode = context.run_config.get("backdoor-attack-mode", "none").lower()
     num_of_malicious_clients = context.run_config.get("num-malicious-clients", 0)
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
-    backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
+    if backdoor_attack_mode == "global-random-attack":
+        backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
+    else:
+        backdoor_rounds = ""
 
     # Initialize model parameters
     model_nd_arrays = get_weights(get_resnet_cnn_model())
