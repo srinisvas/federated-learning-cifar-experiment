@@ -1,4 +1,5 @@
 import json
+import os
 import random
 
 import torch
@@ -26,6 +27,12 @@ def server_fn(context: Context):
         backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
 
     # Initialize model parameters
+
+    model = get_resnet_cnn_model()
+    if torch.cuda.is_available() and os.path.exists("pretrained_cifar.pth"):
+        print("Loading pretrained global model...")
+        model.load_state_dict(torch.load("pretrained_cifar.pth", map_location="cpu"))
+
     model_nd_arrays = get_weights(get_resnet_cnn_model())
     #model_nd_arrays = get_weights(get_basic_cnn_model())
     parameters = ndarrays_to_parameters(model_nd_arrays)
