@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
-from torchvision.transforms import Compose, ToTensor, Normalize
+from torchvision.transforms import Compose, ToTensor, Normalize, RandomCrop, RandomHorizontalFlip
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from fed_learning_cifar_experiment.models.resnet_cnn_model import tiny_resnet18
 from fed_learning_cifar_experiment.task import test
@@ -14,6 +15,8 @@ def main():
     print(f"Using device: {device}")
 
     transform = Compose([
+        RandomCrop(32, padding=4),
+        RandomHorizontalFlip(),
         ToTensor(),
         Normalize(
             mean=(0.4914, 0.4822, 0.4465),
@@ -21,21 +24,29 @@ def main():
         ),
     ])
 
+    test_transform = Compose([
+        ToTensor(),
+        Normalize((0.4914, 0.4822, 0.4465),
+                  (0.2023, 0.1994, 0.2010)),
+    ])
+
     trainset = CIFAR10(root="./data", train=True, download=False, transform=transform)
-    testset = CIFAR10(root="./data", train=False, download=False, transform=transform)
+    testset = CIFAR10(root="./data", train=False, download=False, transform=test_transform)
 
     # Use fewer workers on Windows for safety
     num_workers = 0 if torch.get_num_threads() == 1 else 2
 
-    train_loader = DataLoader(trainset, batch_size=128, shuffle=True, num_workers=num_workers, pin_memory=True)
-    test_loader = DataLoader(testset, batch_size=128, shuffle=False, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=num_workers, pin_memory=True)
+    test_loader = DataLoader(testset, batch_size=64, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     model = tiny_resnet18(num_classes=10, base_width=8).to(device)
-    criterion = nn.CrossEntropyLoss().to(device)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+    #criterion = nn.CrossEntropyLoss().to(device)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9, weight_decay=5e-4)
+    #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+    scheduler = CosineAnnealingLR(optimizer, T_max=100)
 
-    epochs = 15
+    epochs = 100
     print(f"Starting centralized pretraining for {epochs} epochs...")
 
     for epoch in range(epochs):
