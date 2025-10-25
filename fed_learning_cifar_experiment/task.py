@@ -1,20 +1,26 @@
 """fed-learning-cifar-experiment: A Flower / PyTorch app."""
-
+import os
 from collections import OrderedDict
 
 import torch
 import torch.nn as nn
-from flwr_datasets import FederatedDataset
-from flwr_datasets.partitioner import DirichletPartitioner
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from torchvision.transforms import Compose, Normalize, ToTensor
+from datasets import load_from_disk, DatasetDict
 
 from fed_learning_cifar_experiment.utils.backdoor_attack import collate_with_backdoor
 from fed_learning_cifar_experiment.models.basic_cnn_model import Net
 from fed_learning_cifar_experiment.models.resnet_cnn_model import tiny_resnet18
+from fed_learning_cifar_experiment.utils.drichlet_partition import dirichlet_indices
 
 fds = None  # Cache FederatedDataset
+dirichlet_cache = None
+
+base_dir = os.path.dirname(__file__)
+local_torch_path = os.path.join(base_dir, "data", "cifar-10-batches-py")
+local_hf_path = os.path.join(base_dir, "data", "cifar10_hf")
+local_torchvision_root = "data"
 
 def get_resnet_cnn_model(num_classes: int = 10) -> nn.Module:
     return tiny_resnet18(num_classes=num_classes, base_width=8)
@@ -24,17 +30,33 @@ def get_basic_cnn_model() -> nn.Module:
 
 def load_data(partition_id: int, num_partitions: int, alpha_val: float, backdoor_enabled: bool = False,
               target_label: int = 2, poison_fraction: float = 0.1):
-    """Load partition CIFAR10 data."""
+
     global fds
     if fds is None:
-        #Using Dirichlet Partitioner - with alpha - 0.9
-        partitioner = DirichletPartitioner(num_partitions=num_partitions, alpha=alpha_val, partition_by="label")
-        fds = FederatedDataset(
-            dataset="uoft-cs/cifar10",
-            partitioners={"train": partitioner},
-        )
-    partition = fds.load_partition(partition_id)
-    # Divide data on each node: 80% train, 20% test
+        if not os.path.isdir(local_hf_path):
+            raise RuntimeError(
+                f"Offline mode: expected HF dataset at {local_hf_path}. "
+                "Run your pre-download step and copy it here."
+            )
+
+        hf_ds = load_from_disk(local_hf_path)
+        hf_train = hf_ds["train"]
+
+        global dirichlet_cache
+        if dirichlet_cache is None:
+            labels = hf_train["label"]
+            dirichlet_cache = dirichlet_indices(
+                labels=labels,
+                num_partitions=num_partitions,
+                alpha=alpha_val,
+                seed=42,
+            )
+
+        fds = []
+        for indices in dirichlet_cache:
+            fds.append(hf_train.select(indices))
+
+    partition = fds[partition_id]
     partition_train_test = partition.train_test_split(test_size=0.2, seed=42)
     pytorch_transforms = Compose(
         [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
@@ -46,15 +68,6 @@ def load_data(partition_id: int, num_partitions: int, alpha_val: float, backdoor
         return batch
 
     partition_train_test = partition_train_test.with_transform(apply_transforms)
-
-    """Logic to poison a percentage of images
-    if backdoor_enabled:
-        num_poison = int(len(partition_train_test) * poison_fraction)
-        poisoned_indices = torch.randperm(len(partition_train_test))[:num_poison]
-        for idx in poisoned_indices:
-            img, _ = partition_train_test[idx]
-            partition_train_test[idx] = (add_trigger(img), target_label)
-    """
 
     if backdoor_enabled:
         training_data = DataLoader(
@@ -121,17 +134,41 @@ def set_weights(net, parameters):
     net.load_state_dict(state_dict, strict=True)
 
 def load_test_data_for_eval(batch_size=64):
-    """Load CIFAR10 data."""
+    """Load CIFAR-10 test data offline (prefers local torchvision files, then HF copy)."""
 
     pytorch_transforms = Compose(
         [ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
 
-    test_dataset = CIFAR10(root="./data", train=False, download=False, transform=pytorch_transforms)
+    """
+    local_torch_path = os.path.join("data", "cifar-10-batches-py")
+    if os.path.isdir(local_torch_path):
+        test_dataset = CIFAR10(
+            root="data",
+            train=False,
+            download=False,       # never download
+            transform=pytorch_transforms,
+        )
+        return DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    """
 
-    test_data = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    if os.path.isdir(local_hf_path):
+        from datasets import load_from_disk
+        hf_ds = load_from_disk(local_hf_path)
 
-    return test_data
+        def apply_transforms(batch):
+            batch["img"] = [pytorch_transforms(img) for img in batch["img"]]
+            return batch
+
+        hf_ds = hf_ds.with_transform(apply_transforms)
+        return DataLoader(hf_ds["test"], batch_size=batch_size, shuffle=False)
+
+    raise RuntimeError(
+        "Offline mode: CIFAR-10 dataset not found. "
+        "Expected either './data/cifar-10-batches-py/' (torchvision) "
+        "or './data/cifar10_hf/' (Hugging Face)."
+    )
+
 
 def test_eval(net, test_data, device):
     """Evaluate the updated model on the test set for evaluations."""
