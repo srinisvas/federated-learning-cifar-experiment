@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
-from torchvision.transforms import Compose, ToTensor, Normalize, RandomCrop, RandomHorizontalFlip
+from torchvision.transforms import Compose, ToTensor, Normalize, RandomCrop, RandomHorizontalFlip, ColorJitter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from fed_learning_cifar_experiment.models.resnet_cnn_model import tiny_resnet18
@@ -17,6 +17,7 @@ def main():
     transform = Compose([
         RandomCrop(32, padding=4),
         RandomHorizontalFlip(),
+        ColorJitter(0.2, 0.2, 0.2, 0.1),
         ToTensor(),
         Normalize(
             mean=(0.4914, 0.4822, 0.4465),
@@ -39,9 +40,9 @@ def main():
     train_loader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=num_workers, pin_memory=True)
     test_loader = DataLoader(testset, batch_size=64, shuffle=False, num_workers=num_workers, pin_memory=True)
 
-    model = tiny_resnet18(num_classes=10, base_width=8).to(device)
+    model = tiny_resnet18(num_classes=10, base_width=16).to(device)
     #criterion = nn.CrossEntropyLoss().to(device)
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1).to(device)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9, weight_decay=5e-4)
     #scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
     scheduler = CosineAnnealingLR(optimizer, T_max=100)
