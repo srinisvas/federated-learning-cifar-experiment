@@ -33,7 +33,8 @@ def server_fn(context: Context):
         print("Loading pretrained global model...")
         model.load_state_dict(torch.load("pretrained_cifar.pth", map_location="cpu"))
 
-    model_nd_arrays = get_weights(get_resnet_cnn_model())
+    #model_nd_arrays = get_weights(get_resnet_cnn_model())
+    model_nd_arrays = get_weights(model)
     #model_nd_arrays = get_weights(get_basic_cnn_model())
     parameters = ndarrays_to_parameters(model_nd_arrays)
 
@@ -70,8 +71,8 @@ def server_fn(context: Context):
 
     if aggregation_method == "fedavg":
         strategy = SaveFedAvgMetricsStrategy(
-            fraction_fit=1.0,
-            fraction_evaluate=1.0,
+            fraction_fit=0.5,
+            fraction_evaluate=0.5,
             min_fit_clients=10,
             min_available_clients=10,
             evaluate_fn=get_evaluate_fn(model=get_resnet_cnn_model().to(device), test_data=testing_data),
