@@ -29,6 +29,7 @@ class FlowerClient(NumPyClient):
 
     def fit(self, parameters, config):
         set_weights(self.net, parameters)
+        init_state = {k: v.cpu().clone() for k, v in self.net.state_dict().items()}
         init_vec = parameters_to_vector(self.net.parameters()).detach().cpu().clone()
         attack_mode = config.get("backdoor-attack-mode", "none").lower()
         partition_id = self.context.node_config["partition-id"]
@@ -46,7 +47,7 @@ class FlowerClient(NumPyClient):
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
                 self.client_state.config_records["num_backdoor_counts"]["count"] += 1
                 self.local_epochs = 10 # For adversarial training
-                learning_rate = 0.1 # For adversarial training
+                learning_rate = 0.02 # For adversarial training
                 print("Incremented attack count to " + str(self.client_state.config_records["num_backdoor_counts"]))
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
@@ -59,7 +60,7 @@ class FlowerClient(NumPyClient):
                 is_attacking_round = True
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
                 self.local_epochs = 10 # For adversarial training
-                learning_rate = 0.1 # For adversarial training
+                learning_rate = 0.02 # For adversarial training
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
         elif attack_mode == "per-round-attack":
@@ -69,7 +70,7 @@ class FlowerClient(NumPyClient):
                 is_attacking_round = True
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
                 self.local_epochs = 10 # For adversarial training
-                learning_rate = 0.1 # For adversarial training
+                learning_rate = 0.02 # For adversarial training
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
         else:
@@ -88,6 +89,12 @@ class FlowerClient(NumPyClient):
             eta = float(num_clients)
             scaled_vec = init_vec + eta * delta
             vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
+            # restore BN and other buffers from init_state (preserve clean BN stats)
+            sd = self.net.state_dict()
+            for k, v in init_state.items():
+                if "running_mean" in k or "running_var" in k or "num_batches_tracked" in k:
+                    sd[k].copy_(v.to(sd[k].device))
+            self.net.load_state_dict(sd, strict=False)
             return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
         else:
             return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
