@@ -71,8 +71,8 @@ def server_fn(context: Context):
 
     if aggregation_method == "fedavg":
         strategy = SaveFedAvgMetricsStrategy(
-            fraction_fit=0.5,
-            fraction_evaluate=0.5,
+            fraction_fit=1.0,
+            fraction_evaluate=1.0,
             min_fit_clients=10,
             min_available_clients=10,
             evaluate_fn=get_evaluate_fn(model=get_resnet_cnn_model().to(device), test_data=testing_data),
