@@ -40,7 +40,7 @@ class TinyResNet18(nn.Module):
     CIFAR-10 friendly ResNet-18 layout (2-2-2-2) with narrow channels.
     Default width yields ~0.27M params (close to the paper’s lightweight model).
     """
-    def __init__(self, num_classes: int = 10, base_width: int = 16):
+    def __init__(self, num_classes: int = 10, base_width: int = 8):
         """
         base_width controls total params:
           8 -> ~0.27M, 12 -> ~0.6M, 16 -> ~1.05M (approx).
@@ -81,7 +81,7 @@ class TinyResNet18(nn.Module):
         x = self.fc(x)
         return x
 
-def tiny_resnet18(num_classes: int = 10, base_width: int = 16) -> TinyResNet18:
+def tiny_resnet18(num_classes: int = 10, base_width: int = 8) -> TinyResNet18:
     return TinyResNet18(num_classes=num_classes, base_width=base_width)
 
 if __name__ == "__main__":

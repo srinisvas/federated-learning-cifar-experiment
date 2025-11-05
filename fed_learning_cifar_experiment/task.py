@@ -26,7 +26,7 @@ local_hf_path = os.path.join(base_dir, "data", "cifar10_hf")
 local_torchvision_root = "data"
 
 def get_resnet_cnn_model(num_classes: int = 10) -> nn.Module:
-    return tiny_resnet18(num_classes=num_classes, base_width=16)
+    return tiny_resnet18(num_classes=num_classes, base_width=8)
 
 def get_basic_cnn_model() -> nn.Module:
     return Net()

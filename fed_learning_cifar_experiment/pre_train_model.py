@@ -37,10 +37,10 @@ def main():
     train_loader = DataLoader(trainset, batch_size=64, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
     test_loader = DataLoader(testset, batch_size=64, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
 
-    model = tiny_resnet18(num_classes=10, base_width=16).to(device)
+    model = tiny_resnet18(num_classes=10, base_width=8).to(device)
     criterion = nn.CrossEntropyLoss().to(device)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9, weight_decay=1e-3)
-    epochs = 120
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-3)
+    epochs = 200
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-4)
 
     for epoch in range(epochs):
@@ -61,7 +61,7 @@ def main():
         test_loss, test_acc = test(model, test_loader, device)
         print(f"Epoch [{epoch+1}/{epochs}] | Loss: {avg_loss:.4f} | Test Acc: {test_acc*100:.2f}%")
 
-    torch.save(model.state_dict(), "pretrained_cifar.pth")
+    torch.save(model.state_dict(), "pretrained_cifar_bw8.pth")
     final_loss, final_acc = test(model, test_loader, device)
     print(f"\nFinal Centralized Test Accuracy: {final_acc*100:.2f}%")
 
