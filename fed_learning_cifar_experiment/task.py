@@ -115,7 +115,7 @@ def load_data(partition_id: int, num_partitions: int, alpha_val: float, backdoor
 
     return training_data, test_data
 
-def train(net, training_data, epochs, device, lr=0.05):
+def train(net, training_data, epochs, device, lr=0.1):
     """Train the model on the training set using SGD + CosineAnnealingLR and label smoothing."""
     net.to(device)
     criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
