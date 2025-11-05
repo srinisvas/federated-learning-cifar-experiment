@@ -156,13 +156,6 @@ class FlowerClient(NumPyClient):
             scaled_vec = init_vec + eta * delta
             vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
 
-            malicious_sd = net_copy.state_dict()
-            sd = self.net.state_dict()
-            for k, v in malicious_sd.items():
-                if "running_mean" in k or "running_var" in k or "num_batches_tracked" in k:
-                    sd[k].copy_(v.to(sd[k].device))
-            self.net.load_state_dict(sd, strict=False)
-
             return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
         else:
             return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
