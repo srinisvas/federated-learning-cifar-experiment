@@ -151,7 +151,7 @@ class FlowerClient(NumPyClient):
         """
         if is_attacking_round:
             delta = final_vec.cpu() - init_vec.cpu()
-            m = int(config.get("num-malicious-clients", 1))
+            m = 1 #int(config.get("num-malicious-clients", 1))
             eta = sampled_clients / max(1, m)
             scaled_vec = init_vec + eta * delta
             vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
