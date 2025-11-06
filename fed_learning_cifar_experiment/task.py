@@ -87,6 +87,7 @@ def load_data(partition_id: int, num_partitions: int, alpha_val: float, backdoor
         return batch
 
     partition_train = partition_train_test["train"].with_transform(apply_train_transforms)
+    partition_backdoor_train = partition_train_test["train"].with_transform(apply_test_transforms)
     partition_test = partition_train_test["test"].with_transform(apply_test_transforms)
 
     cuda_avail = torch.cuda.is_available()
@@ -140,6 +141,33 @@ def train(net, training_data, epochs, device, lr=0.1):
             running_loss += loss.item()
 
         scheduler.step()
+
+    avg_training_loss = running_loss / len(training_data)
+    final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
+    return avg_training_loss, final_vec
+
+def train_backdoor(net, training_data, epochs, device, lr=0.01):
+    """Train the model on the training set using SGD + CosineAnnealingLR and label smoothing."""
+    net.to(device)
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=1e-6)
+
+    net.train()
+    running_loss = 0.0
+    for _ in range(epochs):
+        for batch in training_data:
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+            images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+
+            optimizer.zero_grad()
+            outputs = net(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
 
     avg_training_loss = running_loss / len(training_data)
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
