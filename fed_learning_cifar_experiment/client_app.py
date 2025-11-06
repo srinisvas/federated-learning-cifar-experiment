@@ -53,7 +53,7 @@ class FlowerClient(NumPyClient):
                 print("Global Attack In Progress #Client ID: " + str(partition_id))
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
                 self.client_state.config_records["num_backdoor_counts"]["count"] += 1
-                self.local_epochs = 20
+                self.local_epochs = 100
                 learning_rate = 0.01
                 print("Incremented attack count to " + str(self.client_state.config_records["num_backdoor_counts"]))
             else:
@@ -66,7 +66,7 @@ class FlowerClient(NumPyClient):
                 print("Global Random Attack Injected #Client ID: " + str(partition_id) + " #Round: " + str(current_round))
                 is_attacking_round = True
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
-                self.local_epochs = 20
+                self.local_epochs = 100
                 learning_rate = 0.01
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
@@ -76,7 +76,7 @@ class FlowerClient(NumPyClient):
                 print("Backdoor Attack Injected #Client ID: " + str(partition_id))
                 is_attacking_round = True
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
-                self.local_epochs = 20
+                self.local_epochs = 100
                 learning_rate = 0.01
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
