@@ -85,6 +85,9 @@ class FlowerClient(NumPyClient):
 
 
         if is_attacking_round:
+            # --- DEBUG METRICS START ---
+            print(f"\n--- DEBUG: ATTACKER (Client {partition_id}, Round {config.get('current-round', 'N/A')}) ---")
+            print(f"--- DEBUG: Initial global model norm (||G_t||): {init_vec.norm().item():.6f}")
             train_loss, final_vec = train_backdoor(
                 self.net,
                 self.training_set,
@@ -92,9 +95,17 @@ class FlowerClient(NumPyClient):
                 self.device,
                 learning_rate
             )
+            print(f"--- DEBUG: Attacker model norm (||X||): {final_vec.norm().item():.6f}")
             delta = final_vec.cpu() - init_vec.cpu()
+            print(f"--- DEBUG: Update delta norm (||X - G_t||): {delta.norm().item():.6f}")
+
             eta = 10 #(num_clients_total / (sampled_clients * fraction_fit))
+            print(f"--- DEBUG: Scaling factor (eta): {eta}")
             scaled_vec = init_vec + eta * delta
+            scaled_delta_norm = (eta * delta).norm().item()
+            print(f"--- DEBUG: Scaled delta norm (||eta * (X - G_t)||): {scaled_delta_norm:.6f}")
+            print(f"--- DEBUG: Final model norm (||G_t + eta*delta||): {scaled_vec.norm().item():.6f}")
+            print(f"--- DEBUG: ATTACK FINISHED ---\n")
             vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
             return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
         else:
