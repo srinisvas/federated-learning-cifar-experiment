@@ -39,8 +39,8 @@ class FlowerClient(NumPyClient):
         attack_mode = config.get("backdoor-attack-mode", "none").lower()
         partition_id = self.context.node_config["partition-id"]
         num_partitions = self.context.node_config["num-partitions"]
-        num_clients_total = int(self.context.run_config.get("num-clients", 10))
-        fraction_fit = float(self.context.run_config.get("fraction-fit", 1.0))
+        num_clients_total = int(self.context.run_config.get("num-clients", 100))
+        fraction_fit = float(self.context.run_config.get("fraction-fit", 0.1))
         sampled_clients = 10
         learning_rate = 0.1
         is_attacking_round = False
