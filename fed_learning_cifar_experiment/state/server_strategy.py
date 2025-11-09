@@ -39,32 +39,32 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         sampled_clients = list(client_manager.sample(sample_size, min_num_clients))
         sampled_ids = [c.cid for c in sampled_clients]
 
-        for cid, proxy in client_manager.all().items():
-            if not getattr(proxy, "properties", None):
+        # Step 1: Fetch and cache properties only once per client
+        if not hasattr(self, "_cid_to_partition"):
+            self._cid_to_partition = {}
+            for cid, proxy in client_manager.all().items():
                 try:
-                    res = proxy.get_properties({})  # returns GetPropertiesRes
+                    res = proxy.get_properties(timeout=10, group_id="fit")
                     if hasattr(res, "properties") and isinstance(res.properties, dict):
-                        proxy.properties = res.properties
-                        print(f"[Server] Cached properties for client {cid}: {proxy.properties}")
+                        self._cid_to_partition[cid] = res.properties.get("partition_id")
+                        print(f"[Server] Cached {cid} -> Partition {self._cid_to_partition[cid]}")
                     else:
-                        proxy.properties = {}
+                        self._cid_to_partition[cid] = None
                 except Exception as e:
-                    print(f"[Server] Could not get properties for client {cid}: {e}")
-                    proxy.properties = {}
+                    print(f"[Server] Could not get properties for {cid}: {e}")
+                    self._cid_to_partition[cid] = None
 
-        cid_to_partition = {
-            c.cid: (c.properties.get("partition_id") if c.properties else None)
-            for c in client_manager.all().values()
-        }
-
-        sampled_partitions = [cid_to_partition.get(cid) for cid in sampled_ids]
+        # Step 2: Map sampled clients to their partitions
+        sampled_partitions = [self._cid_to_partition.get(cid) for cid in sampled_ids]
         print(f"[Round {server_round}] Sampled partitions: {sampled_partitions}")
 
+        # Step 3: Pick malicious partitions among the sampled ones
         valid_partitions = [p for p in sampled_partitions if p is not None]
         num_malicious = min(self.num_of_malicious_clients_per_round, len(valid_partitions))
         malicious_partitions = random.sample(valid_partitions, num_malicious) if num_malicious > 0 else []
         print(f"[Round {server_round}] Malicious partitions: {malicious_partitions}")
 
+        # Step 4: Add to fit config
         config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
         config.update({
             "current-round": server_round,

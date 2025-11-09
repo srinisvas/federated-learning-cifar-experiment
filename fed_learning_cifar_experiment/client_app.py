@@ -30,7 +30,8 @@ class FlowerClient(NumPyClient):
             self.client_state.config_records["num_backdoor_counts"] = ConfigRecord({"count": 0})
 
     def get_properties(self, config):
-        return {"partition_id": self.partition_id}
+        return {"partition_id": str(self.context.node_config["partition-id"])}
+
 
     def fit(self, parameters, config):
         set_weights(self.net, parameters)
