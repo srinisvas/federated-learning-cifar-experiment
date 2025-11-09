@@ -36,21 +36,33 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
     def configure_fit(self, server_round: int, parameters, client_manager):
         num_available_clients = len(client_manager.all())
         sample_size, min_num_clients = self.num_fit_clients(num_available_clients)
-
         sampled_clients = list(client_manager.sample(sample_size, min_num_clients))
         sampled_ids = [c.cid for c in sampled_clients]
 
-        cid_to_partition = {}
-        for proxy in client_manager.all().values():
-            props = getattr(proxy, "properties", {}) or {}
-            partition = props.get("partition_id")
-            cid_to_partition[proxy.cid] = partition
+        for cid, proxy in client_manager.all().items():
+            if not getattr(proxy, "properties", None):
+                try:
+                    res = proxy.get_properties({})  # returns GetPropertiesRes
+                    if hasattr(res, "properties") and isinstance(res.properties, dict):
+                        proxy.properties = res.properties
+                        print(f"[Server] Cached properties for client {cid}: {proxy.properties}")
+                    else:
+                        proxy.properties = {}
+                except Exception as e:
+                    print(f"[Server] Could not get properties for client {cid}: {e}")
+                    proxy.properties = {}
+
+        cid_to_partition = {
+            c.cid: (c.properties.get("partition_id") if c.properties else None)
+            for c in client_manager.all().values()
+        }
 
         sampled_partitions = [cid_to_partition.get(cid) for cid in sampled_ids]
         print(f"[Round {server_round}] Sampled partitions: {sampled_partitions}")
 
-        num_malicious = min(self.num_of_malicious_clients_per_round, len(sampled_partitions))
-        malicious_partitions = random.sample(sampled_partitions, num_malicious)
+        valid_partitions = [p for p in sampled_partitions if p is not None]
+        num_malicious = min(self.num_of_malicious_clients_per_round, len(valid_partitions))
+        malicious_partitions = random.sample(valid_partitions, num_malicious) if num_malicious > 0 else []
         print(f"[Round {server_round}] Malicious partitions: {malicious_partitions}")
 
         config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
@@ -61,7 +73,7 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         })
 
         fit_ins = FitIns(parameters, config)
-        return [(client, fit_ins) for client in sampled_clients]
+        return [(c, fit_ins) for c in sampled_clients]
 
     def aggregate_evaluate(self, rnd, results, failures):
         metrics = super().aggregate_evaluate(rnd, results, failures)
