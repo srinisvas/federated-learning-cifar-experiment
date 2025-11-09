@@ -16,6 +16,8 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
                  num_rounds: int = 0,
                  aggregation_method: str = "",
                  backdoor_attack_mode: str = "",
+                 num_of_malicious_clients = 0,
+                 num_of_malicious_clients_per_round = 0,
                  **kwargs):
         super().__init__(**kwargs)
         self.simulation_id = simulation_id
@@ -28,6 +30,8 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         self.central_asr_history = []
         self.final_centralized_mta = None
         self.final_centralized_asr = None
+        self.num_of_malicious_clients = num_of_malicious_clients
+        self.num_of_malicious_clients_per_round = num_of_malicious_clients_per_round
 
     def configure_fit(self, server_round: int, parameters, client_manager):
         num_available_clients = len(client_manager.all())
@@ -41,8 +45,10 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         sampled_ids = [c.cid for c in sampled_clients]
         print(f"[Round {server_round}] Sampled client IDs: {sampled_ids}")
 
-        num_malicious = 1
-        malicious_ids = random.sample(sampled_ids, num_malicious)
+        num_malicious = self.num_of_malicious_clients
+        num_malicious_per_round = self.num_of_malicious_clients_per_round
+
+        malicious_ids = random.sample(sampled_ids, num_malicious_per_round)
         print(f"[Round {server_round}] Selected malicious clients: {malicious_ids}")
 
         config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}

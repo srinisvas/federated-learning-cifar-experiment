@@ -22,6 +22,7 @@ def server_fn(context: Context):
     aggregation_method = context.run_config.get("aggregation-method", "fedavg").lower()
     backdoor_attack_mode = context.run_config.get("backdoor-attack-mode", "none").lower()
     num_of_malicious_clients = context.run_config.get("num-malicious-clients", 0)
+    num_of_malicious_clients_per_round = context.run_config.get("num-malicious-clients-per-round", 1)
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
     if backdoor_attack_mode == "global-random-attack":
         backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
@@ -49,21 +50,16 @@ def server_fn(context: Context):
         elif backdoor_attack_mode == "global-random-attack":
             on_fit_config = {
                 "backdoor-attack-mode": "global-random-attack",
-                "num-malicious-clients": num_of_malicious_clients,
-                "malicious-client-id": malicious_client_id,
                 "current-round": server_round,
                 "backdoor-rounds": backdoor_rounds,
             }
         elif backdoor_attack_mode ==  "global-attack-first":
             on_fit_config = {
                 "backdoor-attack-mode": "global-attack-first",
-                "num-malicious-clients": num_of_malicious_clients,
-                "malicious-client-id": malicious_client_id,
             }
         elif backdoor_attack_mode == "per-round-attack":
             on_fit_config = {
-                "backdoor-attack-mode": "per-round-attack",
-                "backdoor-client-ids": json.dumps(random.sample(range(num_clients), num_of_malicious_clients)),
+                "backdoor-attack-mode": "per-round-attack"
             }
         return on_fit_config
 
@@ -81,7 +77,10 @@ def server_fn(context: Context):
             simulation_id = simulation_id,
             num_clients = num_clients,
             num_rounds = num_rounds,
-            aggregation_method = aggregation_method
+            aggregation_method = aggregation_method,
+            backdoor_attack_mode = backdoor_attack_mode,
+            num_of_malicious_clients = num_of_malicious_clients,
+            num_of_malicious_clients_per_round = num_of_malicious_clients_per_round
         )
     else:
         strategy = SaveFedAvgMetricsStrategy(

@@ -140,11 +140,15 @@ def client_fn(context: Context):
     #net = get_basic_cnn_model()
     #Load the updated model(ResNet)
     net = get_resnet_cnn_model()
-
     local_epochs = context.run_config["local-epochs"]
+    partition_id = context.node_config["partition-id"]
+    client = FlowerClient(net, local_epochs, context)
 
+    client.cid = str(partition_id)
+    print(f"Initialized client with partition ID: {partition_id} (CID set to {client.cid})")
     # Return Client instance
-    return FlowerClient(net, local_epochs, context).to_client()
+    return client.to_client()
+    #return FlowerClient(net, local_epochs, context).to_client()
 
 # Flower ClientApp
 app = ClientApp(
