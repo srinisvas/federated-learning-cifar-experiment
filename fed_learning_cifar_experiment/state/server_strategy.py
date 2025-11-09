@@ -37,31 +37,21 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         num_available_clients = len(client_manager.all())
         sample_size, min_num_clients = self.num_fit_clients(num_available_clients)
 
-        sampled_clients = client_manager.sample(
-            num_clients=sample_size, min_num_clients=min_num_clients
-        )
-        sampled_clients = list(sampled_clients)
-
-        cid_to_partition = {
-            c.cid: c.properties["partition_id"]
-            for c in client_manager.all().values()
-        }
-
+        sampled_clients = list(client_manager.sample(sample_size, min_num_clients))
         sampled_ids = [c.cid for c in sampled_clients]
 
-        sampled_partitions = [cid_to_partition[cid] for cid in sampled_ids]
+        cid_to_partition = {}
+        for proxy in client_manager.all().values():
+            props = getattr(proxy, "properties", {}) or {}
+            partition = props.get("partition_id")
+            cid_to_partition[proxy.cid] = partition
 
+        sampled_partitions = [cid_to_partition.get(cid) for cid in sampled_ids]
         print(f"[Round {server_round}] Sampled partitions: {sampled_partitions}")
 
-        num_malicious = min(getattr(self, "num_malicious_per_round", 1), len(sampled_partitions))
+        num_malicious = min(self.num_of_malicious_clients_per_round, len(sampled_partitions))
         malicious_partitions = random.sample(sampled_partitions, num_malicious)
-
         print(f"[Round {server_round}] Malicious partitions: {malicious_partitions}")
-
-        num_malicious_per_round = self.num_of_malicious_clients_per_round
-
-        malicious_ids = random.sample(sampled_ids, num_malicious_per_round)
-        print(f"[Round {server_round}] Selected malicious clients: {malicious_ids}")
 
         config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
         config.update({
@@ -71,7 +61,7 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         })
 
         fit_ins = FitIns(parameters, config)
-        return [(c, fit_ins) for c in sampled_clients]
+        return [(client, fit_ins) for client in sampled_clients]
 
     def aggregate_evaluate(self, rnd, results, failures):
         metrics = super().aggregate_evaluate(rnd, results, failures)
