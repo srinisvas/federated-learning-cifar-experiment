@@ -30,7 +30,7 @@ def add_trigger(img, trigger_rgb=(1.0, 0.5, 0.0), trigger_size=8, alpha=1.0, mea
 
     return img
 
-def collate_with_backdoor(batch, num_backdoor_per_batch=20, target_label=2, trigger_rgb=(1.0,0.5,0.0), trigger_size=3, alpha=1.0):
+def collate_with_backdoor(batch, num_backdoor_per_batch=20, target_label=2, trigger_rgb=(1.0,0.5,0.0), trigger_size=8, alpha=1.0):
     """
     batch: list of dicts with keys "img" (tensor C,H,W already transformed) and "label"
     """

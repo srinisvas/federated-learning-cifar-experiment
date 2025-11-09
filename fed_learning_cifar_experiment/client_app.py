@@ -125,8 +125,7 @@ class FlowerClient(NumPyClient):
         set_weights(self.net, parameters)
         loss, accuracy = test(self.net, self.test_set, self.device)
         # Evaluate Client Side Attack Success Rate
-        _, backdoored_test_set = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
-        client_side_asr = evaluate_asr(self.net, backdoored_test_set, target_label=2, device=self.device)
+        client_side_asr = evaluate_asr(self.net, self.test_set, target_label=2, device=self.device)
         return loss, len(self.test_set.dataset), {"mta": accuracy, "asr": client_side_asr}
 
 def client_fn(context: Context):

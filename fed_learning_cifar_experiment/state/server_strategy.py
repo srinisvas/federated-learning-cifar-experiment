@@ -1,4 +1,8 @@
+import json
+import random
+
 import flwr as fl
+from flwr.common import FitIns
 from fed_learning_cifar_experiment.utils.logger import (
     append_distributed_round,
     write_experiment_summary,
@@ -24,6 +28,32 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         self.central_asr_history = []
         self.final_centralized_mta = None
         self.final_centralized_asr = None
+
+    def configure_fit(self, server_round: int, parameters, client_manager):
+        num_available_clients = len(client_manager.all())
+        sample_size, min_num_clients = self.num_fit_clients(num_available_clients)
+
+        sampled_clients = client_manager.sample(
+            num_clients=sample_size, min_num_clients=min_num_clients
+        )
+        sampled_clients = list(sampled_clients)
+
+        sampled_ids = [c.cid for c in sampled_clients]
+        print(f"[Round {server_round}] Sampled client IDs: {sampled_ids}")
+
+        num_malicious = 1
+        malicious_ids = random.sample(sampled_ids, num_malicious)
+        print(f"[Round {server_round}] Selected malicious clients: {malicious_ids}")
+
+        config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
+        config.update({
+            "current-round": server_round,
+            "sampled_client_ids": json.dumps(sampled_ids),
+            "malicious_client_ids": json.dumps(malicious_ids),
+        })
+        fit_ins = FitIns(parameters, config)
+
+        return [(client, fit_ins) for client in sampled_clients]
 
     def aggregate_evaluate(self, rnd, results, failures):
         metrics = super().aggregate_evaluate(rnd, results, failures)

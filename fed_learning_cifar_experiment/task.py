@@ -151,6 +151,7 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
     net.to(device)
     criterion = torch.nn.CrossEntropyLoss().to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
 
     net.train()
     running_loss = 0.0
@@ -168,6 +169,8 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
+
+        scheduler.step()
 
     avg_training_loss = running_loss / len(training_data)
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
