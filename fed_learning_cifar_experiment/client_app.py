@@ -42,6 +42,12 @@ class FlowerClient(NumPyClient):
         num_clients_total = int(self.context.run_config.get("num-clients", 100))
         fraction_fit = float(self.context.run_config.get("fraction-fit", 0.1))
         sampled_clients = 10
+        sampled_client_ids = json.loads(config.get("sampled_client_ids", "[]"))
+        malicious_client_ids = json.loads(config.get("malicious_client_ids", "[]"))
+        current_round = config.get("current-round", "N/A")
+        print(f"[Client {partition_id}] Current round: {current_round}")
+        print(f"[Client {partition_id}] Sampled clients this round: {sampled_client_ids}")
+        print(f"[Client {partition_id}] Malicious clients this round: {malicious_client_ids}")
         learning_rate = 0.1
         is_attacking_round = False
 
