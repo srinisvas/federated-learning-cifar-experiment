@@ -42,10 +42,22 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         )
         sampled_clients = list(sampled_clients)
 
-        sampled_ids = [c.cid for c in sampled_clients]
-        print(f"[Round {server_round}] Sampled client IDs: {sampled_ids}")
+        cid_to_partition = {
+            c.cid: c.properties["partition_id"]
+            for c in client_manager.all().values()
+        }
 
-        num_malicious = self.num_of_malicious_clients
+        sampled_ids = [c.cid for c in sampled_clients]
+
+        sampled_partitions = [cid_to_partition[cid] for cid in sampled_ids]
+
+        print(f"[Round {server_round}] Sampled partitions: {sampled_partitions}")
+
+        num_malicious = min(getattr(self, "num_malicious_per_round", 1), len(sampled_partitions))
+        malicious_partitions = random.sample(sampled_partitions, num_malicious)
+
+        print(f"[Round {server_round}] Malicious partitions: {malicious_partitions}")
+
         num_malicious_per_round = self.num_of_malicious_clients_per_round
 
         malicious_ids = random.sample(sampled_ids, num_malicious_per_round)
@@ -54,12 +66,12 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
         config.update({
             "current-round": server_round,
-            "sampled_client_ids": json.dumps(sampled_ids),
-            "malicious_client_ids": json.dumps(malicious_ids),
+            "sampled_partitions": json.dumps(sampled_partitions),
+            "malicious_partitions": json.dumps(malicious_partitions),
         })
-        fit_ins = FitIns(parameters, config)
 
-        return [(client, fit_ins) for client in sampled_clients]
+        fit_ins = FitIns(parameters, config)
+        return [(c, fit_ins) for c in sampled_clients]
 
     def aggregate_evaluate(self, rnd, results, failures):
         metrics = super().aggregate_evaluate(rnd, results, failures)

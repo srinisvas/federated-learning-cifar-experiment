@@ -24,9 +24,13 @@ class FlowerClient(NumPyClient):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.net.to(self.device)
         self.client_state = context.state
+        self.partition_id = str(self.context.node_config.get("partition-id"))
 
         if "num_backdoor_counts" not in self.client_state.config_records:
             self.client_state.config_records["num_backdoor_counts"] = ConfigRecord({"count": 0})
+
+    def get_properties(self, config):
+        return {"partition_id": self.partition_id}
 
     def fit(self, parameters, config):
         set_weights(self.net, parameters)
@@ -42,6 +46,8 @@ class FlowerClient(NumPyClient):
         num_clients_total = int(self.context.run_config.get("num-clients", 100))
         fraction_fit = float(self.context.run_config.get("fraction-fit", 0.1))
         sampled_clients = 10
+        malicious_partitions = json.loads(config.get("malicious_partitions", "[]"))
+        my_partition = str(self.context.node_config["partition-id"])
         sampled_client_ids = json.loads(config.get("sampled_client_ids", "[]"))
         malicious_client_ids = json.loads(config.get("malicious_client_ids", "[]"))
         current_round = config.get("current-round", "N/A")
@@ -51,7 +57,7 @@ class FlowerClient(NumPyClient):
         learning_rate = 0.1
         is_attacking_round = False
 
-        if attack_mode == "global-attack-first" and partition_id == config["malicious-client-id"]:
+        if attack_mode == "global-attack-first" and my_partition in malicious_partitions:
             num_malicious_clients = int(config.get("num-malicious-clients", 1))
             attack_count = self.client_state.config_records["num_backdoor_counts"]["count"]
             if attack_count < num_malicious_clients:
@@ -64,7 +70,7 @@ class FlowerClient(NumPyClient):
                 print("Incremented attack count to " + str(self.client_state.config_records["num_backdoor_counts"]))
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
-        elif attack_mode == "global-random-attack" and partition_id == config["malicious-client-id"]:
+        elif attack_mode == "global-random-attack" and my_partition in malicious_partitions:
             backdoor_rounds = json.loads(config["backdoor-rounds"])
             print("Rounds Selected for Backdoor:" + str(backdoor_rounds))
             current_round = config["current-round"]
@@ -78,7 +84,7 @@ class FlowerClient(NumPyClient):
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
         elif attack_mode == "per-round-attack":
             backdoor_client_ids = json.loads(config["backdoor-client-ids"])
-            if partition_id in backdoor_client_ids:
+            if my_partition in malicious_partitions:
                 print("Backdoor Attack Injected #Client ID: " + str(partition_id))
                 is_attacking_round = True
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
