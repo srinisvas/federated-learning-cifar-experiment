@@ -46,6 +46,7 @@ simulation-id="exp-999"
 aggregation-method="FedAvg"
 ray-num-cpus = 2
 ray-num-gpus = 1
+num-of-malicious-clients-per-round = 1
 
 # Default federation to use when running the app
 [tool.flwr.federations]

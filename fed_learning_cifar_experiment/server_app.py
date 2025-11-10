@@ -25,7 +25,9 @@ def server_fn(context: Context):
     num_of_malicious_clients_per_round = context.run_config.get("num-malicious-clients-per-round", 1)
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
     if backdoor_attack_mode == "global-random-attack":
-        backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
+        hardcoded_rounds = [1, 2]
+        #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
+        backdoor_rounds = json.dumps(hardcoded_rounds)
 
     # Initialize model parameters
 

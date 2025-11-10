@@ -66,7 +66,7 @@ def load_data(partition_id: int, num_partitions: int, alpha_val: float, backdoor
         v2.ToImage(),
         v2.RandomCrop(32, padding=4),
         v2.RandomHorizontalFlip(),
-        v2.ColorJitter(0.2, 0.2, 0.2, 0.1),
+        v2.ColorJitter(0.1, 0.1, 0.1, 0.05),
         v2.ToDtype(torch.float32, scale=True),
         v2.Normalize((0.4914, 0.4822, 0.4465),
                      (0.2023, 0.1994, 0.2010))
@@ -116,12 +116,15 @@ def load_data(partition_id: int, num_partitions: int, alpha_val: float, backdoor
 
     return training_data, test_data
 
-def train(net, training_data, epochs, device, lr=0.1):
+def train(net, training_data, epochs, device, lr=0.05):
     """Train the model on the training set using SGD + CosineAnnealingLR and label smoothing."""
     net.to(device)
     criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=len(training_data) * epochs
+    )
 
     net.train()
     running_loss = 0.0
@@ -139,8 +142,7 @@ def train(net, training_data, epochs, device, lr=0.1):
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
-
-        scheduler.step()
+            scheduler.step()
 
     avg_training_loss = running_loss / len(training_data)
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
@@ -151,7 +153,10 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
     net.to(device)
     criterion = torch.nn.CrossEntropyLoss().to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, epochs))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=len(training_data) * epochs
+    )
 
     net.train()
     running_loss = 0.0
@@ -169,8 +174,7 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
-
-        scheduler.step()
+            scheduler.step()
 
     avg_training_loss = running_loss / len(training_data)
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
@@ -197,7 +201,6 @@ def test(net, test_data, device):
 
 def get_weights(net):
     return [val.cpu().numpy() for _, val in net.state_dict().items()]
-
 
 def set_weights(net, parameters):
     params_dict = zip(net.state_dict().keys(), parameters)

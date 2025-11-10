@@ -64,6 +64,8 @@ class TinyResNet18(nn.Module):
 
         # Kaiming init (like torchvision)
         for m in self.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.momentum = 0.05
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             elif isinstance(m, nn.BatchNorm2d):

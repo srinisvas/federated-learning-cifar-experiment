@@ -60,10 +60,10 @@ class FlowerClient(NumPyClient):
         #print(f"[Client {partition_id}] Sampled clients: {sampled_client_ids}")
         #print(f"[Client {partition_id}] Malicious clients: {malicious_client_ids}")
 
-        learning_rate = 0.1
+        learning_rate = 0.05
         is_attacking_round = False
 
-        if attack_mode == "global-attack-first" and is_malicious:
+        if attack_mode == "global-attack-first":
             num_malicious_clients = int(config.get("num-malicious-clients", 1))
             attack_count = self.client_state.config_records["num_backdoor_counts"]["count"]
             if attack_count < num_malicious_clients:
