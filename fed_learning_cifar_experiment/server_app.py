@@ -7,6 +7,7 @@ from flwr.common import Context, ndarrays_to_parameters
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
 from flwr.server.strategy import FedAvg
 
+from fed_learning_cifar_experiment.state.fedavg_cluster_defense import FedAvgClusterDefenseStrategy
 from fed_learning_cifar_experiment.state.server_strategy import SaveFedAvgMetricsStrategy
 
 from fed_learning_cifar_experiment.utils.evaluate_attack import get_evaluate_fn
@@ -84,19 +85,22 @@ def server_fn(context: Context):
             num_of_malicious_clients = num_of_malicious_clients,
             num_of_malicious_clients_per_round = num_of_malicious_clients_per_round
         )
-    else:
-        strategy = SaveFedAvgMetricsStrategy(
+    elif aggregation_method == "fedavg-cluster-defense":
+        strategy = FedAvgClusterDefenseStrategy(
             fraction_fit=0.1,
             fraction_evaluate=0.1,
             min_fit_clients=10,
             min_available_clients=100,
-            evaluate_fn=get_evaluate_fn(model=get_resnet_cnn_model(), test_data=testing_data),
+            evaluate_fn=get_evaluate_fn(model=get_resnet_cnn_model().to(device), test_data=testing_data),
             initial_parameters=parameters,
             on_fit_config_fn=on_fit_config_fn,
             simulation_id = simulation_id,
             num_clients = num_clients,
             num_rounds=num_rounds,
-            aggregation_method=aggregation_method
+            aggregation_method=aggregation_method,
+            backdoor_attack_mode = backdoor_attack_mode,
+            num_of_malicious_clients = num_of_malicious_clients,
+            num_of_malicious_clients_per_round = num_of_malicious_clients_per_round
         )
 
     config = ServerConfig(num_rounds=num_rounds)
@@ -104,4 +108,3 @@ def server_fn(context: Context):
     return ServerAppComponents(strategy=strategy, config=config)
 
 app = ServerApp(server_fn=server_fn)
-
