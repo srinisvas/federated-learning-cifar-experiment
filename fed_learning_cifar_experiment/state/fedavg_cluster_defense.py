@@ -65,17 +65,8 @@ def _cluster_centroid(unit_dirs: torch.Tensor, idxs: List[int]) -> torch.Tensor:
     return c / (c.norm() + 1e-12)
 
 
-# -------------------- combined strategy --------------------
-
 class SaveFedAvgMetricsClusterDefenseStrategy(fl.server.strategy.FedAvg):
     """
-    Combines:
-      1) Your custom configure_fit() (malicious sampling + per-client config)
-      2) FedAvg + clustering defense in aggregate_fit()
-      3) Your aggregate_evaluate() metrics persistence (MTA/ASR)
-      4) record_centralized_eval()
-
-    No per-client history is stored as part of defense.
     """
 
     def __init__(
@@ -138,10 +129,8 @@ class SaveFedAvgMetricsClusterDefenseStrategy(fl.server.strategy.FedAvg):
 
         # Keep a global reference model for delta computation
         # NOTE: Strategy has initial_parameters in FedAvg __init__ only if passed.
-        # We will lazily set it when first round happens.
         self._global_nd = None
 
-    # ---------------- customization hooks (unchanged behavior) ----------------
 
     def configure_fit(self, server_round: int, parameters, client_manager):
         num_available = len(client_manager.all())
@@ -173,7 +162,6 @@ class SaveFedAvgMetricsClusterDefenseStrategy(fl.server.strategy.FedAvg):
             self.final_centralized_mta = mta
             self.final_centralized_asr = asr
 
-    # ---------------- defense happens here ----------------
 
     def aggregate_fit(self, server_round, results, failures):
         if not results:
@@ -305,7 +293,6 @@ class SaveFedAvgMetricsClusterDefenseStrategy(fl.server.strategy.FedAvg):
 
         return params, metrics
 
-    # ---------------- evaluation logging (your original) ----------------
 
     def aggregate_evaluate(self, rnd, results, failures):
         metrics = super().aggregate_evaluate(rnd, results, failures)
