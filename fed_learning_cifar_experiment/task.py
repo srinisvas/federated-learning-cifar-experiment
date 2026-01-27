@@ -180,6 +180,92 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
     return avg_training_loss, final_vec
 
+def train_constrain_and_scale(
+    net,
+    training_data,
+    epochs,
+    device,
+    init_vec: torch.Tensor,      # G_t vector
+    lr=0.01,
+    alpha=0.9,                   # Bagdasaryan α
+    lano_type="l2",               # "l2", "cos", "l2+cos"
+    epsilon=0.02,                 # early stop threshold
+):
+    """
+    Constrain-and-scale attacker training.
+    Trains X starting from G_t using:
+      L = α L_class + (1-α) L_ano
+    """
+
+    net.to(device)
+    net.train()
+
+    # Initialize model exactly at G_t
+    vector_to_parameters(init_vec.to(device), net.parameters())
+
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+    optimizer = torch.optim.SGD(
+        net.parameters(),
+        lr=lr,
+        momentum=0.9,
+        weight_decay=0.0
+    )
+
+    g_vec = init_vec.to(device)
+
+    for _ in range(epochs):
+        running_loss = 0.0
+        steps = 0
+
+        for batch in training_data:
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            logits = net(images)
+            l_class = criterion(logits, labels)
+
+            w_vec = parameters_to_vector(net.parameters())
+
+            # ---- anomaly loss ----
+            if lano_type == "l2":
+                l_ano = torch.sum((w_vec - g_vec) ** 2)
+
+            elif lano_type == "cos":
+                cos = torch.nn.functional.cosine_similarity(
+                    w_vec, g_vec, dim=0, eps=1e-8
+                )
+                l_ano = 1.0 - cos
+
+            elif lano_type == "l2+cos":
+                l2 = torch.sum((w_vec - g_vec) ** 2)
+                cos = torch.nn.functional.cosine_similarity(
+                    w_vec, g_vec, dim=0, eps=1e-8
+                )
+                l_ano = l2 + (1.0 - cos)
+
+            else:
+                raise ValueError(f"Unknown lano_type: {lano_type}")
+
+            loss = alpha * l_class + (1.0 - alpha) * l_ano
+            loss.backward()
+            optimizer.step()
+
+            running_loss += l_class.item()
+            steps += 1
+
+        if running_loss / max(1, steps) < epsilon:
+            break
+
+    final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
+    return final_vec
+
 def test(net, test_data, device):
     net.to(device)
     net.eval()

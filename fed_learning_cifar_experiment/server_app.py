@@ -24,15 +24,19 @@ def server_fn(context: Context):
     simulation_id = context.run_config.get("simulation-id")
     aggregation_method = context.run_config.get("aggregation-method", "fedavg").lower()
     backdoor_attack_mode = context.run_config.get("backdoor-attack-mode", "none").lower()
+    backdoor_attack_type = context.run_config.get("backdoor-attack-type", "train-and-scale").lower()
     num_of_malicious_clients = context.run_config.get("num-malicious-clients", 0)
     num_of_malicious_clients_per_round = context.run_config.get("num-malicious-clients-per-round", 1)
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
-    if backdoor_attack_mode == "global-random-attack":
+    if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "train-and-scale":
         hardcoded_rounds = [1, 2]
         #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
         backdoor_rounds = json.dumps(hardcoded_rounds)
-
-    # Initialize model parameters
+    if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "constrain-and-scale":
+        hardcoded_rounds = [1, 11, 21, 31, 41]
+        #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
+        backdoor_rounds = json.dumps(hardcoded_rounds)
+    # Initialize model parameter
 
     model = get_resnet_cnn_model()
     if torch.cuda.is_available() and os.path.exists("pretrained_cifar_bw8.pth"):
@@ -57,14 +61,17 @@ def server_fn(context: Context):
                 "backdoor-attack-mode": "global-random-attack",
                 "current-round": server_round,
                 "backdoor-rounds": backdoor_rounds,
+                "backdoor-attack-type": backdoor_attack_type,
             }
         elif backdoor_attack_mode ==  "global-attack-first":
             on_fit_config = {
                 "backdoor-attack-mode": "global-attack-first",
+                "backdoor-attack-type": backdoor_attack_type,
             }
         elif backdoor_attack_mode == "per-round-attack":
             on_fit_config = {
-                "backdoor-attack-mode": "per-round-attack"
+                "backdoor-attack-mode": "per-round-attack",
+                "backdoor-attack-type": backdoor_attack_type
             }
         return on_fit_config
 

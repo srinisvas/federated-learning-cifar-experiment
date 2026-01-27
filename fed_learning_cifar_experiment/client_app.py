@@ -8,7 +8,7 @@ from flwr.common import Context, ConfigRecord
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 from fed_learning_cifar_experiment.task import (get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
-                                                get_basic_cnn_model, train_backdoor)
+                                                get_basic_cnn_model, train_backdoor, train_constrain_and_scale)
 from fed_learning_cifar_experiment.utils.evaluate_attack import evaluate_asr
 
 
@@ -42,6 +42,7 @@ class FlowerClient(NumPyClient):
         net_copy.to(self.device)
 
         attack_mode = config.get("backdoor-attack-mode", "none").lower()
+        attack_type = config.get("backdoor-attack-type", "train-and-scale").lower()
         partition_id = self.context.node_config["partition-id"]
         num_partitions = self.context.node_config["num-partitions"]
         num_clients_total = int(self.context.run_config.get("num-clients", 100))
@@ -103,29 +104,62 @@ class FlowerClient(NumPyClient):
 
 
         if is_attacking_round:
-            # --- DEBUG METRICS START ---
-            #print(f"\n--- DEBUG: ATTACKER (Client {partition_id}, Round {config.get('current-round', 'N/A')}) ---")
-            #print(f"--- DEBUG: Initial global model norm (||G_t||): {init_vec.norm().item():.6f}")
-            train_loss, final_vec = train_backdoor(
-                self.net,
-                self.training_set,
-                self.local_epochs,
-                self.device,
-                learning_rate
-            )
-            #print(f"--- DEBUG: Attacker model norm (||X||): {final_vec.norm().item():.6f}")
-            delta = final_vec.cpu() - init_vec.cpu()
-            #print(f"--- DEBUG: Update delta norm (||X - G_t||): {delta.norm().item():.6f}")
 
-            eta = 10 #(num_clients_total / (sampled_clients * fraction_fit))
-            #print(f"--- DEBUG: Scaling factor (eta): {eta}")
-            scaled_vec = init_vec + eta * delta
-            scaled_delta_norm = (eta * delta).norm().item()
-            #print(f"--- DEBUG: Scaled delta norm (||eta * (X - G_t)||): {scaled_delta_norm:.6f}")
-            #print(f"--- DEBUG: Final model norm (||G_t + eta*delta||): {scaled_vec.norm().item():.6f}")
-            #print(f"--- DEBUG: ATTACK FINISHED ---\n")
-            vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
-            return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
+            if attack_type == "train-and-scale":
+                # --- DEBUG METRICS START ---
+                # print(f"\n--- DEBUG: ATTACKER (Client {partition_id}, Round {config.get('current-round', 'N/A')}) ---")
+                # print(f"--- DEBUG: Initial global model norm (||G_t||): {init_vec.norm().item():.6f}")
+                train_loss, final_vec = train_backdoor(
+                    self.net,
+                    self.training_set,
+                    self.local_epochs,
+                    self.device,
+                    learning_rate
+                )
+                # print(f"--- DEBUG: Attacker model norm (||X||): {final_vec.norm().item():.6f}")
+                delta = final_vec.cpu() - init_vec.cpu()
+                # print(f"--- DEBUG: Update delta norm (||X - G_t||): {delta.norm().item():.6f}")
+
+                eta = 10  # (num_clients_total / (sampled_clients * fraction_fit))
+                # print(f"--- DEBUG: Scaling factor (eta): {eta}")
+                scaled_vec = init_vec + eta * delta
+                scaled_delta_norm = (eta * delta).norm().item()
+                # print(f"--- DEBUG: Scaled delta norm (||eta * (X - G_t)||): {scaled_delta_norm:.6f}")
+                # print(f"--- DEBUG: Final model norm (||G_t + eta*delta||): {scaled_vec.norm().item():.6f}")
+                # print(f"--- DEBUG: ATTACK FINISHED ---\n")
+                vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
+                return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
+
+            else:
+                # ---- CONSTRAIN & SCALE ATTACK ----
+
+                final_vec = train_constrain_and_scale(
+                    net=self.net,
+                    training_data=self.training_set,
+                    epochs=self.local_epochs,
+                    device=self.device,
+                    init_vec=init_vec,
+                    lr=learning_rate,
+                    alpha=0.9,
+                    lano_type="l2+cos",  # try: "l2", "cos", "l2+cos"
+                    epsilon=0.02,
+                )
+
+                delta = final_vec - init_vec
+
+                # Model replacement scaling (same as before)
+                gamma = 10  # ≈ num_clients / selected_clients
+                scaled_vec = init_vec + gamma * delta
+
+                vector_to_parameters(
+                    scaled_vec.to(self.device),
+                    self.net.parameters()
+                )
+
+                return get_weights(self.net), len(self.training_set.dataset), {
+                    "attack": "constrain-and-scale"
+                }
+
         else:
             train_loss, final_vec = train(
                 self.net,
