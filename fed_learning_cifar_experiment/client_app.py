@@ -132,7 +132,7 @@ class FlowerClient(NumPyClient):
 
             else:
                 # ---- CONSTRAIN & SCALE ATTACK ----
-
+                """
                 final_vec = train_constrain_and_scale(
                     net=self.net,
                     training_data=self.training_set,
@@ -143,6 +143,18 @@ class FlowerClient(NumPyClient):
                     alpha=0.9,
                     lano_type="l2+cos",  # try: "l2", "cos", "l2+cos"
                     epsilon=0.02,
+                )
+                """
+                final_vec = train_constrain_and_scale(
+                    net=self.net,
+                    training_data=self.training_set,
+                    epochs=self.local_epochs,
+                    device=self.device,
+                    init_vec=init_vec,
+                    lr=learning_rate,
+                    lambda_l2=0.01,
+                    lambda_cos=0.0,
+                    epsilon=None,
                 )
 
                 delta = final_vec - init_vec
