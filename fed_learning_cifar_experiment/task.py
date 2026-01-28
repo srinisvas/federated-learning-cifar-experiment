@@ -11,6 +11,7 @@ from torchvision.transforms import RandomCrop, RandomHorizontalFlip, ColorJitter
 from torchvision.transforms import Compose, Normalize, ToTensor
 from torchvision.transforms import v2
 from datasets import load_from_disk, DatasetDict
+import torch.nn.functional as F
 
 from fed_learning_cifar_experiment.utils.backdoor_attack import collate_with_backdoor
 from fed_learning_cifar_experiment.models.basic_cnn_model import Net
@@ -180,7 +181,7 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
     return avg_training_loss, final_vec
 
-def train_constrain_and_scale(
+def train_constrain_and_scale_v1(
     net,
     training_data,
     epochs,
@@ -265,6 +266,70 @@ def train_constrain_and_scale(
 
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
     return final_vec
+
+def train_constrain_and_scale(
+    net,
+    training_data,
+    epochs,
+    device,
+    init_vec: torch.Tensor,
+    lr=0.01,
+    lambda_l2=0.01,          # start here
+    lambda_cos=0.0,          # keep 0 initially
+    epsilon=None,            # disable early-stop initially
+):
+    net.to(device)
+    net.train()
+
+    vector_to_parameters(init_vec.to(device), net.parameters())
+
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0.0)
+
+    g_vec = init_vec.to(device)
+
+    for _ in range(epochs):
+        running_ce = 0.0
+        steps = 0
+
+        for batch in training_data:
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            logits = net(images)
+            l_class = criterion(logits, labels)
+
+            w_vec = parameters_to_vector(net.parameters())
+            delta = (w_vec - g_vec)
+
+            # Scale-stable constraint
+            l2 = torch.mean(delta * delta)
+
+            loss = l_class + lambda_l2 * l2
+
+            # optional cosine on WEIGHTS (rarely needed at first)
+            if lambda_cos > 0.0:
+                cos = F.cosine_similarity(w_vec, g_vec, dim=0, eps=1e-8)
+                loss = loss + lambda_cos * (1.0 - cos)
+
+            loss.backward()
+            optimizer.step()
+
+            running_ce += float(l_class.detach().cpu())
+            steps += 1
+
+        if epsilon is not None and (running_ce / max(1, steps)) < epsilon:
+            break
+
+    return parameters_to_vector(net.parameters()).detach().cpu().clone()
+
 
 def test(net, test_data, device):
     net.to(device)
