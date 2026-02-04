@@ -41,6 +41,7 @@ local-epochs = 2
 backdoor-attack-mode="per-round"
 backdoor-attack-type="train-and-scale"
 num-malicious-clients=1
+num-malicious-clients-per-round=1
 num-clients=100
 malicious-client-id=2
 simulation-id="exp-999"
