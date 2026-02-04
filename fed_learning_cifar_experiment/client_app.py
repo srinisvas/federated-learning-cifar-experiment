@@ -67,7 +67,7 @@ class FlowerClient(NumPyClient):
         is_attacking_round = False
 
         if attack_mode == "global-attack-first":
-            num_malicious_clients = int(config.get("num-malicious-clients", 1))
+            num_malicious_clients = int(config.get("num-malicious-clients", 3))
             attack_count = self.client_state.config_records["num_backdoor_counts"]["count"]
             if attack_count < num_malicious_clients:
                 is_attacking_round = True
@@ -141,7 +141,7 @@ class FlowerClient(NumPyClient):
                     epochs=self.local_epochs,
                     device=self.device,
                     init_vec=init_vec,
-                    prev_global_vec=prev_global_vec,  # this is new
+                    prev_global_vec=prev_global_vec,
                     lr=learning_rate,
                     lambda_norm=0.02,
                     lambda_dir=0.5,
