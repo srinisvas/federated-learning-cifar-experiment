@@ -42,7 +42,7 @@ class FlowerClient(NumPyClient):
         net_copy = get_resnet_cnn_model()
         set_weights(net_copy, parameters)
         net_copy.to(self.device)
-
+        local_epochs = self.local_epochs
         attack_mode = config.get("backdoor-attack-mode", "none").lower()
         attack_type = config.get("backdoor-attack-type", "train-and-scale").lower()
         partition_id = self.context.node_config["partition-id"]
@@ -74,7 +74,7 @@ class FlowerClient(NumPyClient):
                 print("Global Attack In Progress #Client ID: " + str(partition_id))
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
                 self.client_state.config_records["num_backdoor_counts"]["count"] += 1
-                self.local_epochs = 40
+                local_epochs = 40
                 learning_rate = 0.01
                 #print("Incremented attack count to " + str(self.client_state.config_records["num_backdoor_counts"]))
             else:
@@ -87,20 +87,31 @@ class FlowerClient(NumPyClient):
                 print("Global Random Attack Injected #Client ID: " + str(partition_id) + " #Round: " + str(current_round))
                 is_attacking_round = True
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
-                self.local_epochs = 40
+                local_epochs = 40
                 learning_rate = 0.01
             else:
                 self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
+
         elif attack_mode == "per-round-attack":
-            backdoor_client_ids = json.loads(config["backdoor-client-ids"])
+
             if is_malicious:
-                print("Backdoor Attack Injected #Client ID: " + str(partition_id))
+                print(f"[Round {current_round}] Per-Round Attack Injected #Client ID: {partition_id}")
                 is_attacking_round = True
-                self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9, backdoor_enabled=True)
-                self.local_epochs = 40
+                self.training_set, _ = load_data(
+                    partition_id,
+                    num_partitions,
+                    alpha_val=0.9,
+                    backdoor_enabled=True
+                )
+                local_epochs = 40
                 learning_rate = 0.01
             else:
-                self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
+                self.training_set, _ = load_data(
+                    partition_id,
+                    num_partitions,
+                    alpha_val=0.9
+                )
+
         else:
             self.training_set, _ = load_data(partition_id, num_partitions, alpha_val=0.9)
 
@@ -114,7 +125,7 @@ class FlowerClient(NumPyClient):
                 train_loss, final_vec = train_backdoor(
                     self.net,
                     self.training_set,
-                    self.local_epochs,
+                    local_epochs,
                     self.device,
                     learning_rate
                 )
@@ -138,7 +149,7 @@ class FlowerClient(NumPyClient):
                 final_vec = train_constrain_and_scale(
                     net=self.net,
                     training_data=self.training_set,
-                    epochs=self.local_epochs,
+                    epochs=local_epochs,
                     device=self.device,
                     init_vec=init_vec,
                     prev_global_vec=prev_global_vec,
@@ -175,7 +186,7 @@ class FlowerClient(NumPyClient):
             train_loss, final_vec = train(
                 self.net,
                 self.training_set,
-                self.local_epochs,
+                local_epochs,
                 self.device,
                 learning_rate
             )
