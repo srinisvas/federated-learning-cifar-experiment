@@ -81,6 +81,8 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         # Flower may still call Strategy.evaluate (implemented in base classes).
         self._evaluate_fn_fallback = kwargs.get("evaluate_fn", None)
         self._initial_parameters_fallback = kwargs.get("initial_parameters", None)
+        # Track previous global model (g_{t-1}) to send to clients
+        self.prev_global_parameters: Optional[Parameters] = None
 
     def configure_fit(
         self,
@@ -108,6 +110,16 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                     "is_malicious": str(client.cid in malicious_ids),
                 }
             )
+
+            if self.prev_global_parameters is not None:
+                config["prev_global_tensors_hex"] = json.dumps(
+                    [t.hex() for t in self.prev_global_parameters.tensors]
+                )
+                config["prev_global_tensor_type"] = self.prev_global_parameters.tensor_type
+            else:
+                config["prev_global_tensors_hex"] = "[]"
+                config["prev_global_tensor_type"] = "numpy.ndarray"
+
             fit_ins_list.append((client, FitIns(parameters, config)))
 
         return fit_ins_list
@@ -161,6 +173,35 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
             )
 
         return metrics
+
+    def aggregate_fit(self, rnd, results, failures):
+        aggregated = super().aggregate_fit(rnd, results, failures)
+
+        if aggregated and aggregated[0] is not None:
+            selected_params = aggregated[0]
+
+            # Identify which client was selected by Krum
+            selected_cid = None
+            for client_proxy, fit_res in results:
+                if fit_res.parameters.tensors == selected_params.tensors:
+                    selected_cid = client_proxy.cid
+                    break
+
+            is_attacker_selected = (
+                    selected_cid is not None
+                    and selected_cid in getattr(self, "_last_round_malicious_ids", set())
+            )
+
+            print(
+                f"[Round {rnd}][Krum] "
+                f"Selected CID={selected_cid}, "
+                f"Attacker selected={is_attacker_selected}"
+            )
+
+            # Keep your existing behavior
+            self.prev_global_parameters = selected_params
+
+        return aggregated
 
     def record_centralized_eval(self, rnd: int, loss: float, mta: float, asr: float) -> None:
         self.central_mta_history.append(mta)

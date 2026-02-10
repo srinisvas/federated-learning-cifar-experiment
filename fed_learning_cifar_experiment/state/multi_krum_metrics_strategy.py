@@ -55,6 +55,8 @@ class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
         self.eps = float(eps)
 
         self._global_parameters_for_round: Optional[Parameters] = None
+        # Track previous global model (g_{t-1}) to send to clients
+        self.prev_global_parameters: Optional[Parameters] = None
 
     # -------------------------------------------------------
     # Utility helpers
@@ -110,6 +112,15 @@ class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
                     "is_malicious": str(client.cid in malicious_ids),
                 }
             )
+            if self.prev_global_parameters is not None:
+                config["prev_global_tensors_hex"] = json.dumps(
+                    [t.hex() for t in self.prev_global_parameters.tensors]
+                )
+                config["prev_global_tensor_type"] = self.prev_global_parameters.tensor_type
+            else:
+                config["prev_global_tensors_hex"] = "[]"
+                config["prev_global_tensor_type"] = "numpy.ndarray"
+
             fit_ins_list.append((client, FitIns(parameters, config)))
 
         return fit_ins_list
@@ -130,13 +141,17 @@ class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
             print(f"[Round {server_round}] Falling back to FedAvg (n={n}, f={f})")
             aggregated = super().aggregate_fit(server_round, results, failures)
             if aggregated and aggregated[0] is not None:
+                self.prev_global_parameters = self._global_parameters_for_round
                 self._global_parameters_for_round = aggregated[0]
+
             return aggregated
 
         if self._global_parameters_for_round is None:
             aggregated = super().aggregate_fit(server_round, results, failures)
             if aggregated and aggregated[0] is not None:
+                self.prev_global_parameters = self._global_parameters_for_round
                 self._global_parameters_for_round = aggregated[0]
+
             return aggregated
 
         global_nds = [np.asarray(a) for a in parameters_to_ndarrays(self._global_parameters_for_round)]
@@ -145,7 +160,9 @@ class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
         if global_vec.size == 0:
             aggregated = super().aggregate_fit(server_round, results, failures)
             if aggregated and aggregated[0] is not None:
+                self.prev_global_parameters = self._global_parameters_for_round
                 self._global_parameters_for_round = aggregated[0]
+
             return aggregated
 
         client_params_nds = []
@@ -191,6 +208,15 @@ class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
             f"(f={f}, m={m}). Selected CIDs={selected_cids}"
         )
 
+        is_attacker_selected = any(
+            cid in self._last_round_malicious_ids for cid in selected_cids
+        )
+
+        print(
+            f"[Round {server_round}][Multi-Krum] "
+            f"Attacker selected={is_attacker_selected}"
+        )
+
         # -------- SAFE AGGREGATION --------
 
         template = client_params_nds[selected_idx[0]]
@@ -212,6 +238,9 @@ class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
             agg_nds.append(acc.astype(base.dtype, copy=False))
 
         new_parameters = ndarrays_to_parameters(agg_nds)
+        self._global_parameters_for_round = new_parameters
+
+        self.prev_global_parameters = self._global_parameters_for_round
         self._global_parameters_for_round = new_parameters
 
         return new_parameters, {}

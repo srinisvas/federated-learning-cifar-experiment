@@ -6,6 +6,7 @@ import torch
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context, ConfigRecord
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from flwr.common import Parameters, parameters_to_ndarrays
 
 from fed_learning_cifar_experiment.task import (get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
                                                 get_basic_cnn_model, train_backdoor, train_constrain_and_scale, krum_safe_scale)
@@ -38,11 +39,23 @@ class FlowerClient(NumPyClient):
         set_weights(self.net, parameters)
         init_state = {k: v.cpu().clone() for k, v in self.net.state_dict().items()}
         init_vec = parameters_to_vector(self.net.parameters()).detach().cpu().clone()
-        prev_global_vec = self.prev_global_vec
+
+        prev_global_vec = None
+        tensors_hex = json.loads(config.get("prev_global_tensors_hex", "[]"))
+        if tensors_hex:
+            prev_params = Parameters(
+                tensors=[bytes.fromhex(h) for h in tensors_hex],
+                tensor_type=config.get("prev_global_tensor_type", "numpy.ndarray"),
+            )
+            prev_nds = parameters_to_ndarrays(prev_params)
+            tmp = get_resnet_cnn_model()
+            set_weights(tmp, prev_nds)
+            prev_global_vec = parameters_to_vector(tmp.parameters()).detach().cpu().clone()
+        else:
+            prev_global_vec = None
+
         # Ensure we always have a prev_global_vec after round 1
         # If None, treat previous as current for stable behavior
-        if prev_global_vec is None:
-            prev_global_vec = init_vec.clone()
         net_copy = get_resnet_cnn_model()
         set_weights(net_copy, parameters)
         net_copy.to(self.device)
@@ -172,7 +185,7 @@ class FlowerClient(NumPyClient):
                     cos_to_benign = torch.dot(delta, benign_delta) / (
                                 (delta.norm() + 1e-12) * (benign_delta.norm() + 1e-12))
                     print(f"[Client {partition_id}][Round {current_round}] "
-                          f"||Δ||={delta.norm().item():.4f}, "
+                          f"||Δ||={delta.norm().item():.6f}, "
                           f"cos(Δ,Δ_benign)={cos_to_benign.item():.4f}")
 
                 # Adaptive gamma: keep attacker update magnitude near last benign/global step
@@ -181,8 +194,11 @@ class FlowerClient(NumPyClient):
                     benign_step = torch.norm(init_vec - prev_global_vec).item()
                     attack_step = torch.norm(final_vec - init_vec).item()
                     # If our crafted update is tiny, allow modest amplification; otherwise clamp
-                    gamma = min(gamma_cap, (benign_step / (attack_step + 1e-12)))
-                    gamma = max(1.0, gamma)  # don't shrink below 1 unless you want stealth-only
+                    if benign_step > 1e-8 and attack_step > 1e-12:
+                        gamma = min(gamma_cap, benign_step / attack_step)
+                        gamma = max(1.0, gamma)
+                    else:
+                        gamma = 1.0
                 else:
                     gamma = 1.0
 

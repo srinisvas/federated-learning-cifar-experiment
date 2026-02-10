@@ -130,7 +130,7 @@ def train(net, training_data, epochs, device, lr=0.05):
 
     net.train()
     running_loss = 0.0
-    for _ in range(epochs):
+    for epoch in range(epochs):
         for batch in training_data:
             if isinstance(batch, dict):
                 images, labels = batch["img"], batch["label"]
@@ -162,7 +162,7 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
 
     net.train()
     running_loss = 0.0
-    for _ in range(epochs):
+    for epoch in range(epochs):
         for batch in training_data:
             if isinstance(batch, dict):
                 images, labels = batch["img"], batch["label"]
@@ -243,7 +243,7 @@ def train_constrain_and_scale(
     criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
     optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0.0)
 
-    for _ in range(epochs):
+    for epoch in range(epochs):
         running_ce = 0.0
         steps = 0
 
@@ -289,6 +289,31 @@ def train_constrain_and_scale(
                 delta_ref = (g - g_prev)
                 l_pair = torch.mean((delta - delta_ref) ** 2)
                 loss = loss + lambda_pair * l_pair
+
+            # --- Warm-up: let CE dominate early ---
+            camouflage_scale = 1.0
+            if prev_global_vec is not None:
+                # Ramp camouflage over epochs
+                warmup_epochs = max(1, epochs // 3)
+                camouflage_scale = min(1.0, epoch / max(1, epochs // 3))
+
+            # Base task objective
+            loss = ce
+
+            # (1) norm camouflage
+            loss += camouflage_scale * lambda_norm * l_norm
+
+            # (2) direction camouflage
+            if d_unit is not None and lambda_dir > 0.0:
+                loss += camouflage_scale * lambda_dir * l_dir
+
+            # (3) target-norm matching
+            if target_delta_norm is not None and lambda_target_norm > 0.0:
+                loss += camouflage_scale * lambda_target_norm * l_tnorm
+
+            # (4) pairwise Krum-proxy camouflage
+            if g_prev is not None and lambda_pair > 0.0:
+                loss += camouflage_scale * lambda_pair * l_pair
 
             loss.backward()
             optimizer.step()
