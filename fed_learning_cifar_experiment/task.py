@@ -227,6 +227,8 @@ def train_constrain_and_scale(
 
     # Direction d_t (unit) from last global drift, if available
     d_unit = None
+    g_prev = None
+
     if prev_global_vec is not None:
         g_prev = prev_global_vec.detach().to(device)
         d = (g - g_prev)
