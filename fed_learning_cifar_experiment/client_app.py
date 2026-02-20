@@ -8,8 +8,11 @@ from flwr.common import Context, ConfigRecord
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 from flwr.common import Parameters, parameters_to_ndarrays
 
-from fed_learning_cifar_experiment.task import (get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
-                                                get_basic_cnn_model, train_backdoor, train_constrain_and_scale, krum_safe_scale)
+from fed_learning_cifar_experiment.task import (
+    get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
+    get_basic_cnn_model, train_backdoor, krum_safe_scale,
+    train_constrain_and_scale_krum_proxy, build_reference_clean_deltas
+)
 from fed_learning_cifar_experiment.utils.evaluate_attack import evaluate_asr
 
 
@@ -40,6 +43,9 @@ class FlowerClient(NumPyClient):
         init_state = {k: v.cpu().clone() for k, v in self.net.state_dict().items()}
         init_vec = parameters_to_vector(self.net.parameters()).detach().cpu().clone()
 
+        net_ref = get_resnet_cnn_model()
+        set_weights(net_ref, parameters)
+
         prev_global_vec = None
         tensors_hex = json.loads(config.get("prev_global_tensors_hex", "[]"))
         if tensors_hex:
@@ -59,7 +65,6 @@ class FlowerClient(NumPyClient):
         net_copy = get_resnet_cnn_model()
         set_weights(net_copy, parameters)
         net_copy.to(self.device)
-        local_epochs = self.local_epochs
         attack_mode = config.get("backdoor-attack-mode", "none").lower()
         attack_type = config.get("backdoor-attack-type", "train-and-scale").lower()
         partition_id = self.context.node_config["partition-id"]
@@ -139,6 +144,7 @@ class FlowerClient(NumPyClient):
                 # --- DEBUG METRICS START ---
                 # print(f"\n--- DEBUG: ATTACKER (Client {partition_id}, Round {config.get('current-round', 'N/A')}) ---")
                 # print(f"--- DEBUG: Initial global model norm (||G_t||): {init_vec.norm().item():.6f}")
+                local_epochs = self.local_epochs
                 train_loss, final_vec = train_backdoor(
                     self.net,
                     self.training_set,
@@ -162,62 +168,107 @@ class FlowerClient(NumPyClient):
                 return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
 
             else:
-                # ---- CONSTRAIN & SCALE ATTACK ----
-                final_vec = train_constrain_and_scale(
-                    net=self.net,
-                    training_data=self.training_set,
-                    epochs=local_epochs,
-                    device=self.device,
-                    init_vec=init_vec,
-                    prev_global_vec=prev_global_vec,
-                    lr=learning_rate,
-                    lambda_norm=0.005,
-                    lambda_dir=1.0,
-                    lambda_target_norm=0.05,
-                    lambda_pair=0.20,
-                    epsilon_ce=None,
+                clean_training_set, _ = load_data(
+                    partition_id,
+                    num_partitions,
+                    alpha_val=0.9,
+                    backdoor_enabled=False
                 )
 
-                delta = final_vec - init_vec
+                backdoor_training_set, _ = load_data(
+                    partition_id,
+                    num_partitions,
+                    alpha_val=0.9,
+                    backdoor_enabled=True
+                )
 
-                if prev_global_vec is not None:
-                    benign_delta = (init_vec - prev_global_vec)
-                    cos_to_benign = torch.dot(delta, benign_delta) / (
-                                (delta.norm() + 1e-12) * (benign_delta.norm() + 1e-12))
-                    print(f"[Client {partition_id}][Round {current_round}] "
-                          f"||Δ||={delta.norm().item():.6f}, "
-                          f"cos(Δ,Δ_benign)={cos_to_benign.item():.4f}")
+                net_clean = get_resnet_cnn_model()
+                set_weights(net_clean, parameters)  # start from current global
+                net_clean.to(self.device)
 
-                # Adaptive gamma: keep attacker update magnitude near last benign/global step
-                gamma_cap = 5.0  # safe upper cap; tune 3-6
-                if prev_global_vec is not None:
-                    benign_step = torch.norm(init_vec - prev_global_vec).item()
-                    attack_step = torch.norm(final_vec - init_vec).item()
-                    # If our crafted update is tiny, allow modest amplification; otherwise clamp
-                    if benign_step > 1e-8 and attack_step > 1e-12:
-                        gamma = min(gamma_cap, benign_step / attack_step)
-                        gamma = max(1.0, gamma)
-                    else:
-                        gamma = 1.0
+                clean_loss, clean_vec = train(
+                    net_clean,
+                    clean_training_set,
+                    epochs=local_epochs,  # or local_epochs, but you used 40 for attack
+                    device=self.device,
+                    lr=0.005  # benign-like LR (match your honest clients)
+                )
+                clean_delta = (clean_vec - init_vec.cpu()).detach().cpu()
+
+                # 2) Build local "peer" reference clean deltas (bootstrapped)
+                # Keep small for speed. Need at least krum_k+1.
+                ref_deltas = build_reference_clean_deltas(
+                    net=net_ref,  # base architecture (untrained clone is fine)
+                    training_data=clean_training_set,
+                    device=self.device,
+                    init_vec=init_vec.cpu(),
+                    epochs=1,
+                    lr=0.005,
+                    num_refs=8,
+                    seed_base=1337 + int(partition_id),
+                    label_smoothing=0.05,
+                )
+
+                # 3) Run constrained backdoor training using the BACKDOOR loader
+                final_vec = train_constrain_and_scale_krum_proxy(
+                    net=self.net,
+                    training_data=backdoor_training_set,
+                    device=self.device,
+                    init_vec=init_vec.cpu(),
+                    clean_delta=clean_delta,
+                    ref_clean_deltas=ref_deltas,
+
+                    epochs=local_epochs,  # you set local_epochs=40 for attacker
+                    lr=learning_rate,  # you set 0.01 for attacker
+                    label_smoothing=0.0,
+                    weight_decay=0.0,
+
+                    lambda_match_clean=1.0,
+                    lambda_dir=0.2,
+                    lambda_norm_match=0.2,
+                    lambda_krum_proxy=1.0,
+
+                    krum_k=7,  # if n=10 and f=1 => n-f-2=7, but proxy 3-5 is ok
+                    min_norm_frac=0.10,
+                )
+
+                # 4) Krum-safe scaling: keep gamma SMALL
+                # Base it on clean_delta norm, NOT prev_global step.
+                attack_step = torch.norm(final_vec - init_vec.cpu()).item()
+                clean_step = torch.norm(clean_delta).item()
+
+                gamma_cap = 2.0  # Krum safe cap, start conservative
+                if clean_step > 1e-8 and attack_step > 1e-12:
+                    gamma = min(gamma_cap, clean_step / attack_step)
+                    gamma = max(1.0, gamma)
                 else:
                     gamma = 1.0
 
+                delta_adv = final_vec - init_vec.cpu()
+                dist_to_clean = torch.norm(delta_adv - clean_delta).item()
+                print(f"[Client {partition_id}][Round {current_round}] "
+                      f"||Δ_adv||={delta_adv.norm().item():.4f} "
+                      f"||Δ_clean||={clean_delta.norm().item():.4f} "
+                      f"||Δ_adv-Δ_clean||={dist_to_clean:.4f} gamma={gamma:.2f}")
+                dists = [torch.norm(delta_adv - d).item() for d in ref_deltas]
+                dists.sort()
+                print(f"[Client {partition_id}] Krum-proxy distances (7 smallest): {dists[:7]}")
+
                 scaled_vec = krum_safe_scale(
                     final_vec=final_vec,
-                    init_vec=init_vec,
+                    init_vec=init_vec.cpu(),
                     gamma=gamma,
                     keep_delta_norm=False,
                 )
 
-                vector_to_parameters(
-                    scaled_vec.to(self.device),
-                    self.net.parameters()
-                )
-
+                vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
                 self.prev_global_vec = init_vec.clone()
 
-                return get_weights(self.net), len(self.training_set.dataset), {
-                    "attack": "constrain-and-scale"
+                return get_weights(self.net), len(backdoor_training_set.dataset), {
+                    "attack": "constrain-and-scale-krum-proxy",
+                    "gamma": gamma,
+                    "clean_step": clean_step,
+                    "attack_step": attack_step,
                 }
 
         else:

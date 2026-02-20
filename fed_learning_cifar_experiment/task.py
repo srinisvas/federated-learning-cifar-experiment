@@ -11,6 +11,9 @@ from torchvision.transforms import RandomCrop, RandomHorizontalFlip, ColorJitter
 from torchvision.transforms import Compose, Normalize, ToTensor
 from torchvision.transforms import v2
 from datasets import load_from_disk, DatasetDict
+from torch.nn.utils import parameters_to_vector, vector_to_parameters
+import copy
+import torch
 import torch.nn.functional as F
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
@@ -32,6 +35,202 @@ def get_resnet_cnn_model(num_classes: int = 10) -> nn.Module:
 
 def get_basic_cnn_model() -> nn.Module:
     return Net()
+
+@torch.no_grad()
+def _clone_net(net):
+    # Safe deep copy for PyTorch modules
+    return copy.deepcopy(net)
+
+
+def build_reference_clean_deltas(
+    net,
+    training_data,
+    device,
+    init_vec: torch.Tensor,
+    epochs: int = 1,
+    lr: float = 0.05,
+    num_refs: int = 6,
+    seed_base: int = 1234,
+    label_smoothing: float = 0.05,
+):
+    """
+    Build a small set of "honest-like" reference deltas using ONLY local clean training.
+    Each reference delta is produced by training from init_vec with a different seed.
+    Returns: list[torch.Tensor] of deltas on CPU, each shaped [D]
+    """
+    refs = []
+    init_vec_cpu = init_vec.detach().cpu()
+
+    for r in range(num_refs):
+        torch.manual_seed(seed_base + r)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed_base + r)
+
+        net_r = _clone_net(net)
+        net_r.to(device)
+        net_r.train()
+
+        # Start from global (init_vec)
+        g = init_vec_cpu.to(device)
+        vector_to_parameters(g, net_r.parameters())
+
+        criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
+        optimizer = torch.optim.SGD(net_r.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
+
+        # Simple schedule is OK, keep it consistent with your benign client settings
+        for _ in range(epochs):
+            for batch in training_data:
+                if isinstance(batch, dict):
+                    images, labels = batch["img"], batch["label"]
+                else:
+                    images, labels = batch
+                images = images.to(device, non_blocking=True)
+                labels = labels.to(device, non_blocking=True)
+
+                optimizer.zero_grad(set_to_none=True)
+                logits = net_r(images)
+                loss = criterion(logits, labels)
+                loss.backward()
+                optimizer.step()
+
+        w_r = parameters_to_vector(net_r.parameters()).detach().cpu()
+        delta_r = (w_r - init_vec_cpu).clone()
+        refs.append(delta_r)
+
+    return refs
+
+def train_constrain_and_scale_krum_proxy(
+    net,
+    training_data,
+    device,
+    init_vec: torch.Tensor,                 # global weights w_t as vector
+    clean_delta: torch.Tensor,              # delta_clean = w_clean - w_t (CPU or GPU ok)
+    ref_clean_deltas=None,                  # optional list[delta_ref] (CPU); if None, built internally
+
+    # Optim
+    epochs: int = 2,
+    lr: float = 0.01,
+    label_smoothing: float = 0.0,           # attacker usually 0
+    weight_decay: float = 0.0,
+
+    # Backdoor strength is controlled by your data loader (collate_with_backdoor)
+    # Camouflage weights
+    lambda_match_clean: float = 1.0,        # ||delta_adv - delta_clean||^2
+    lambda_dir: float = 0.2,                # align direction with delta_clean
+    lambda_norm_match: float = 0.0,         # match ||delta_adv|| to ||delta_clean||
+    lambda_krum_proxy: float = 1.0,         # Krum score proxy weight
+
+    # Krum proxy config
+    krum_k: int = 7,                        # sum distances to K nearest reference deltas
+    ref_scale: float = 1.0,                 # scale references (usually 1.0)
+    eps: float = 1e-12,
+
+    # Optional: keep delta from collapsing
+    min_norm_frac: float = 0.10,            # enforce ||delta_adv|| >= frac * ||delta_clean||
+):
+    """
+    Bagdasaryan-style constrain-and-scale training with a Krum-score proxy loss.
+
+    You must pass clean_delta computed from a clean local run:
+      clean_vec = train(clean_net, clean_data, ...)
+      clean_delta = clean_vec - init_vec
+
+    Krum proxy uses reference clean deltas (bootstrapped locally) and minimizes
+    sum of distances to the K nearest reference deltas:
+      proxy = sum_{j in KNN(refs)} ||delta_adv - delta_ref_j||^2
+
+    Returns: final_vec (weights) on CPU
+    """
+
+    net = net.to(device)
+    net.train()
+
+    # Start from global weights
+    g = init_vec.detach().to(device)
+    vector_to_parameters(g, net.parameters())
+
+    init_vec_cpu = init_vec.detach().cpu()
+    clean_delta_cpu = clean_delta.detach().cpu()
+
+    # Build references if not provided
+    if ref_clean_deltas is None:
+        # Use small epochs for refs; keep consistent with benign client
+        ref_clean_deltas = build_reference_clean_deltas(
+            net=_clone_net(net).cpu(),          # clone a CPU copy, builder moves to device
+            training_data=training_data,
+            device=device,
+            init_vec=init_vec_cpu,
+            epochs=1,
+            lr=max(lr, 0.005),                   # benign-like LR
+            num_refs=max(krum_k + 1, 5),
+            label_smoothing=0.05,
+        )
+
+    # Stack refs as tensor on device for fast distance computation
+    refs = torch.stack([d * ref_scale for d in ref_clean_deltas], dim=0).to(device)  # [M, D]
+
+    # Targets from clean delta
+    clean_delta_dev = clean_delta_cpu.to(device)
+    clean_norm = torch.norm(clean_delta_dev) + eps
+    clean_unit = clean_delta_dev / clean_norm
+
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
+
+    for epoch in range(epochs):
+        for batch in training_data:
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+            logits = net(images)
+            ce = criterion(logits, labels)
+
+            w = parameters_to_vector(net.parameters())              # [D]
+            delta_adv = (w - g)                                     # [D]
+            adv_norm = torch.norm(delta_adv) + eps
+            adv_unit = delta_adv / adv_norm
+
+            # (A) Bagdasaryan core: stay close to clean delta
+            match_clean = torch.mean((delta_adv - clean_delta_dev) ** 2)
+
+            # (B) direction alignment with clean delta
+            cos = torch.dot(adv_unit, clean_unit).clamp(-1.0, 1.0)
+            dir_loss = (1.0 - cos)
+
+            # (C) norm matching to clean update magnitude
+            norm_match = (adv_norm - clean_norm) ** 2
+
+            # (D) Krum-score proxy: sum of distances to K nearest refs
+            # dist_j = ||delta_adv - refs[j]||^2
+            diff = refs - delta_adv.unsqueeze(0)                    # [M, D]
+            dists = torch.sum(diff * diff, dim=1)                   # [M]
+            k = min(krum_k, dists.numel())
+            knn_vals, _ = torch.topk(dists, k=k, largest=False)
+            krum_proxy = torch.sum(knn_vals) / float(k)
+
+            # (E) prevent collapse to zero (optional but recommended)
+            min_norm = (min_norm_frac * clean_norm).detach()
+            collapse_penalty = F.relu(min_norm - adv_norm) ** 2
+
+            loss = (
+                ce
+                + lambda_match_clean * match_clean
+                + lambda_dir * dir_loss
+                + lambda_norm_match * norm_match
+                + lambda_krum_proxy * krum_proxy
+                + collapse_penalty
+            )
+
+            loss.backward()
+            optimizer.step()
+
+    return parameters_to_vector(net.parameters()).detach().cpu().clone()
 
 def load_data(partition_id: int, num_partitions: int, alpha_val: float, backdoor_enabled: bool = False,
               target_label: int = 2, poison_fraction: float = 0.1):
