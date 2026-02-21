@@ -200,11 +200,17 @@ def train_constrain_and_scale_krum_proxy(
             match_clean = torch.mean((delta_adv - clean_delta_dev) ** 2)
 
             # (B) direction alignment with clean delta
-            cos = torch.dot(adv_unit, clean_unit).clamp(-1.0, 1.0)
-            dir_loss = (1.0 - cos)
+            if torch.isfinite(clean_norm) and clean_norm > 1e-6 and adv_norm > 1e-6:
+                cos = torch.dot(adv_unit, clean_unit).clamp(-1.0, 1.0)
+                dir_loss = (1.0 - cos)
+            else:
+                dir_loss = torch.zeros((), device=device)
 
             # (C) norm matching to clean update magnitude
-            norm_match = (adv_norm - clean_norm) ** 2
+            if torch.isfinite(clean_norm):
+                norm_match = (adv_norm - clean_norm) ** 2
+            else:
+                norm_match = torch.zeros((), device=device)
 
             # (D) Krum-score proxy: sum of distances to K nearest refs
             # dist_j = ||delta_adv - refs[j]||^2
