@@ -136,6 +136,7 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         malicious_ids = random.sample(sampled_ids, num_malicious)
 
         fit_ins_list: List[Tuple[ClientProxy, FitIns]] = []
+        print("Sampled clients for round {}: {}".format(server_round, sampled_ids))
         for client in sampled_clients:
             config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
             config.update(
