@@ -7,6 +7,7 @@ import flwr as fl
 from flwr.common import FitIns, Parameters
 from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
+from flwr.common import GetPropertiesIns
 
 from fed_learning_cifar_experiment.utils.logger import (
     append_distributed_round,
@@ -83,6 +84,19 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         self._initial_parameters_fallback = kwargs.get("initial_parameters", None)
         # Track previous global model (g_{t-1}) to send to clients
         self.prev_global_parameters: Optional[Parameters] = None
+
+    def _get_partition_id(self, client: ClientProxy) -> int:
+        if client.cid in self._cid_to_partition:
+            return self._cid_to_partition[client.cid]
+
+        try:
+            res = client.get_properties(GetPropertiesIns(config={}), timeout=5.0)
+            pid = int(res.properties.get("partition_id", -1))
+        except Exception:
+            pid = -1
+
+        self._cid_to_partition[client.cid] = pid
+        return pid
 
     def configure_fit(
         self,
@@ -187,10 +201,19 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                     selected_cid = client_proxy.cid
                     break
 
-            is_attacker_selected = (
-                    selected_cid is not None
-                    and selected_cid in getattr(self, "_last_round_malicious_ids", set())
+            selected_partition = None
+            if selected_cid is not None:
+                for client_proxy, _ in results:
+                    if client_proxy.cid == selected_cid:
+                        selected_partition = self._get_partition_id(client_proxy)
+                        break
+
+            print(
+                f"[Round {rnd}][Krum] "
+                f"Selected CID={selected_cid}, "
+                f"Partition={selected_partition}, "
             )
+
 
             print(
                 f"[Round {rnd}][Krum] "
