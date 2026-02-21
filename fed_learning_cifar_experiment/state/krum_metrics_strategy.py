@@ -93,6 +93,7 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
             res = client.get_properties(GetPropertiesIns(config={}), timeout=5.0)
             pid = int(res.properties.get("partition_id", -1))
         except Exception:
+            print("Exception while getting partition_id for client {}".format(client.cid))
             pid = -1
 
         self._cid_to_partition[client.cid] = pid
@@ -212,13 +213,6 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                 f"[Round {rnd}][Krum] "
                 f"Selected CID={selected_cid}, "
                 f"Partition={selected_partition}, "
-            )
-
-
-            print(
-                f"[Round {rnd}][Krum] "
-                f"Selected CID={selected_cid}, "
-                f"Attacker selected={is_attacker_selected}"
             )
 
             # Keep your existing behavior
