@@ -255,8 +255,7 @@ def train_constrain_and_scale_krum_proxy(
 
                 # target norm from benign refs (more stable than clean_delta)
                 ref_norms = torch.norm(refs, dim=1)
-                target_norm, _ = ref_norms.median()
-                target_norm = target_norm.detach()
+                target_norm = ref_norms.median().detach()
 
                 # allow small slack
                 lo = 0.95 * target_norm
