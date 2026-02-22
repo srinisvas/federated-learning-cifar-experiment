@@ -3,6 +3,8 @@ import random
 import inspect
 import traceback
 from typing import Dict, List, Optional, Tuple, Any
+import numpy as np
+from flwr.common import parameters_to_ndarrays
 
 import flwr as fl
 from flwr.common import FitIns, Parameters
@@ -137,6 +139,7 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
 
         fit_ins_list: List[Tuple[ClientProxy, FitIns]] = []
         print("Sampled clients for round {}: {}".format(server_round, sampled_ids))
+        print("Malicious clients for round {}: {}".format(server_round, malicious_ids))
         for client in sampled_clients:
             config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
             config.update(
@@ -212,35 +215,74 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         return metrics
 
     def aggregate_fit(self, rnd, results, failures):
-        aggregated = super().aggregate_fit(rnd, results, failures)
+        # Let Flower handle edge cases first
+        if not results or failures:
+            return super().aggregate_fit(rnd, results, failures)
 
-        if aggregated and aggregated[0] is not None:
-            selected_params = aggregated[0]
+        # ---- Extract updates ----
+        client_ids = []
+        client_updates = []
+        client_proxies = []
 
-            # Identify which client was selected by Krum
-            selected_cid = None
-            for client_proxy, fit_res in results:
-                if fit_res.parameters.tensors == selected_params.tensors:
-                    selected_cid = client_proxy.cid
-                    break
+        for client_proxy, fit_res in results:
+            nds = parameters_to_ndarrays(fit_res.parameters)
+            flat = np.concatenate([p.flatten() for p in nds])
+            client_updates.append(flat)
+            client_ids.append(client_proxy.cid)
+            client_proxies.append(client_proxy)
 
-            selected_partition = None
-            if selected_cid is not None:
-                for client_proxy, _ in results:
-                    if client_proxy.cid == selected_cid:
-                        selected_partition = self._get_partition_id(client_proxy)
-                        break
+        X = np.stack(client_updates)
+        n = len(X)
 
+        # Byzantine count (version-safe)
+        f = getattr(self, "num_byzantine", None)
+        if f is None:
+            f = getattr(self, "num_malicious_clients", 0)
+
+        k = n - f - 2
+        if k <= 0:
+            raise RuntimeError(f"Invalid Krum config: n={n}, f={f}")
+
+        # ---- Compute Krum scores ----
+        scores = {}
+        for i in range(n):
+            dists = []
+            for j in range(n):
+                if i == j:
+                    continue
+                dists.append(np.linalg.norm(X[i] - X[j]) ** 2)
+            score = sum(sorted(dists)[:k])
+            scores[client_ids[i]] = score
+
+        # ---- Print scores ----
+        print(f"\n[Round {rnd}][Krum Scores]")
+        for cid in sorted(scores, key=scores.get):
+            proxy = next(p for p in client_proxies if p.cid == cid)
+            pid = self._get_partition_id(proxy)
             print(
-                f"[Round {rnd}][Krum] "
-                f"Selected CID={selected_cid}, "
-                f"Partition={selected_partition}, "
+                f"  CID={cid:>6} | "
+                f"Partition={pid:>3} | "
+                f"Score={scores[cid]:.6e}"
             )
 
-            # Keep your existing behavior
-            self.prev_global_parameters = selected_params
+        # ---- Select winner ----
+        selected_cid = min(scores, key=scores.get)
+        selected_idx = client_ids.index(selected_cid)
+        selected_params = results[selected_idx][1].parameters
 
-        return aggregated
+        selected_partition = self._get_partition_id(client_proxies[selected_idx])
+
+        print(
+            f"[Round {rnd}][Krum Selected] "
+            f"CID={selected_cid}, Partition={selected_partition}\n"
+        )
+
+        # ---- Maintain your existing behavior ----
+        self.prev_global_parameters = selected_params
+
+        # ---- Return in Flower-compatible format ----
+        # Use Flower’s expected return type: (Parameters, metrics)
+        return selected_params, {}
 
     def record_centralized_eval(self, rnd: int, loss: float, mta: float, asr: float) -> None:
         self.central_mta_history.append(mta)
