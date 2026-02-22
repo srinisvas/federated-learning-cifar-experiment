@@ -154,9 +154,10 @@ def train_constrain_and_scale_krum_proxy(
 
     # Build references if not provided
     if ref_clean_deltas is None:
+        clean_ref_net = tiny_resnet18(num_classes=10, base_width=8)
         # Use small epochs for refs; keep consistent with benign client
         ref_clean_deltas = build_reference_clean_deltas(
-            net=_clone_net(net).cpu(),          # clone a CPU copy, builder moves to device
+            net=clean_ref_net,          # clone a CPU copy, builder moves to device
             training_data=training_data,
             device=device,
             init_vec=init_vec_cpu,
@@ -220,9 +221,11 @@ def train_constrain_and_scale_krum_proxy(
             knn_vals, _ = torch.topk(dists, k=k, largest=False)
             krum_proxy = torch.sum(knn_vals) / float(k)
 
-            # (E) prevent collapse to zero (optional but recommended)
+            # (E) prevent collapse to zero
+            """
             min_norm = (min_norm_frac * clean_norm).detach()
             collapse_penalty = F.relu(min_norm - adv_norm) ** 2
+            """
 
             loss = (
                 ce
@@ -230,11 +233,20 @@ def train_constrain_and_scale_krum_proxy(
                 + lambda_dir * dir_loss
                 + lambda_norm_match * norm_match
                 + lambda_krum_proxy * krum_proxy
-                + collapse_penalty
             )
 
             loss.backward()
             optimizer.step()
+
+            with torch.no_grad():
+                w = parameters_to_vector(net.parameters())
+                delta_adv = w - g
+                adv_norm = torch.norm(delta_adv)
+                min_norm = (min_norm_frac * clean_norm).clamp(min=1e-6)
+
+                if adv_norm < min_norm:
+                    delta_adv.mul_(min_norm / (adv_norm + eps))
+                    vector_to_parameters(g + delta_adv, net.parameters())
 
     return parameters_to_vector(net.parameters()).detach().cpu().clone()
 
