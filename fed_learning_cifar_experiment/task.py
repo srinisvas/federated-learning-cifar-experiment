@@ -115,11 +115,11 @@ def train_constrain_and_scale_krum_proxy(
 
     # Backdoor strength is controlled by your data loader (collate_with_backdoor)
     # Camouflage weights
-    lambda_match_clean: float = 1.0,        # ||delta_adv - delta_clean||^2
+    lambda_match_clean: float = 0.0,        # ||delta_adv - delta_clean||^2
     lambda_dir: float = 0.2,                # align direction with delta_clean
-    lambda_norm_match: float = 0.0,         # match ||delta_adv|| to ||delta_clean||
-    lambda_krum_proxy: float = 1.0,         # Krum score proxy weight
-
+    lambda_norm_match: float = 1.0,         # match ||delta_adv|| to ||delta_clean||
+    lambda_krum_proxy: float = 1.0, # Krum score proxy weight
+    lambda_centroid: float = 0.5,
     # Krum proxy config
     krum_k: int = 7,                        # sum distances to K nearest reference deltas
     ref_scale: float = 1.0,                 # scale references (usually 1.0)
@@ -200,12 +200,17 @@ def train_constrain_and_scale_krum_proxy(
             # (A) Bagdasaryan core: stay close to clean delta
             match_clean = torch.mean((delta_adv - clean_delta_dev) ** 2)
 
+            """
             # (B) direction alignment with clean delta
             if torch.isfinite(clean_norm) and clean_norm > 1e-6 and adv_norm > 1e-6:
                 cos = torch.dot(adv_unit, clean_unit).clamp(-1.0, 1.0)
                 dir_loss = (1.0 - cos)
             else:
                 dir_loss = torch.zeros((), device=device)
+            """
+
+            # disable direction loss for strict Krum
+            dir_loss = torch.zeros((), device=device)
 
             # (C) norm matching to clean update magnitude
             if torch.isfinite(clean_norm):
@@ -214,12 +219,17 @@ def train_constrain_and_scale_krum_proxy(
                 norm_match = torch.zeros((), device=device)
 
             # (D) Krum-score proxy: sum of distances to K nearest refs
-            # dist_j = ||delta_adv - refs[j]||^2
-            diff = refs - delta_adv.unsqueeze(0)                    # [M, D]
-            dists = torch.sum(diff * diff, dim=1)                   # [M]
+
+            # (D1) centroid of benign-like references
+            ref_mean = refs.mean(dim=0)
+            centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
+
+            # (D2) KNN distances to refs
+            diff = refs - delta_adv.unsqueeze(0)
+            dists = torch.sum(diff * diff, dim=1)
             k = min(krum_k, dists.numel())
             knn_vals, _ = torch.topk(dists, k=k, largest=False)
-            krum_proxy = torch.sum(knn_vals) / float(k)
+            knn_loss = torch.mean(knn_vals)
 
             # (E) prevent collapse to zero
             """
@@ -228,11 +238,11 @@ def train_constrain_and_scale_krum_proxy(
             """
 
             loss = (
-                ce
-                + lambda_match_clean * match_clean
-                + lambda_dir * dir_loss
-                + lambda_norm_match * norm_match
-                + lambda_krum_proxy * krum_proxy
+                    ce
+                    + lambda_dir * dir_loss
+                    + lambda_norm_match * norm_match
+                    + lambda_centroid * centroid_loss
+                    + lambda_krum_proxy * knn_loss
             )
 
             loss.backward()
@@ -241,11 +251,22 @@ def train_constrain_and_scale_krum_proxy(
             with torch.no_grad():
                 w = parameters_to_vector(net.parameters())
                 delta_adv = w - g
-                adv_norm = torch.norm(delta_adv)
-                min_norm = (min_norm_frac * clean_norm).clamp(min=1e-6)
+                adv_norm = torch.norm(delta_adv) + eps
 
-                if adv_norm < min_norm:
-                    delta_adv.mul_(min_norm / (adv_norm + eps))
+                # target norm from benign refs (more stable than clean_delta)
+                ref_norms = torch.norm(refs, dim=1)
+                target_norm, _ = ref_norms.median()
+                target_norm = target_norm.detach()
+
+                # allow small slack
+                lo = 0.95 * target_norm
+                hi = 1.05 * target_norm
+
+                if adv_norm < lo:
+                    delta_adv.mul_(lo / adv_norm)
+                    vector_to_parameters(g + delta_adv, net.parameters())
+                elif adv_norm > hi:
+                    delta_adv.mul_(hi / adv_norm)
                     vector_to_parameters(g + delta_adv, net.parameters())
 
     return parameters_to_vector(net.parameters()).detach().cpu().clone()

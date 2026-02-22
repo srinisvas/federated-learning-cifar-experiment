@@ -39,7 +39,7 @@ class FlowerClient(NumPyClient):
 
 
     def fit(self, parameters, config):
-        benign_epochs = self.local_epochs
+        benign_epochs = 5
         attack_epochs = self.local_epochs
         set_weights(self.net, parameters)
         init_state = {k: v.cpu().clone() for k, v in self.net.state_dict().items()}
@@ -127,8 +127,8 @@ class FlowerClient(NumPyClient):
                     alpha_val=0.9,
                     backdoor_enabled=True
                 )
-                attack_epochs = 40
-                learning_rate = 0.01
+                attack_epochs = 5
+                learning_rate = 0.005
             else:
                 self.training_set, _ = load_data(
                     partition_id,
@@ -207,7 +207,7 @@ class FlowerClient(NumPyClient):
                     init_vec=init_vec.cpu(),
                     epochs=1,
                     lr=0.005,
-                    num_refs=8,
+                    num_refs=16,
                     seed_base=1337 + int(partition_id),
                     label_smoothing=0.05,
                 )
@@ -222,7 +222,7 @@ class FlowerClient(NumPyClient):
                     ref_clean_deltas=ref_deltas,
 
                     epochs=attack_epochs,  # you set local_epochs=40 for attacker
-                    lr=learning_rate,  # you set 0.01 for attacker
+                    lr=0.005,  # you set 0.01 for attacker
                     label_smoothing=0.0,
                     weight_decay=0.0,
 
@@ -240,13 +240,14 @@ class FlowerClient(NumPyClient):
                 attack_step = torch.norm(final_vec - init_vec.cpu()).item()
                 clean_step = torch.norm(clean_delta).item()
 
+                """
                 gamma_cap = 2.0  # Krum safe cap, start conservative
                 if clean_step > 1e-8 and attack_step > 1e-12:
                     gamma = min(gamma_cap, clean_step / attack_step)
                     gamma = max(1.0, gamma)
                 else:
                     gamma = 1.0
-
+                
                 delta_adv = final_vec - init_vec.cpu()
                 dist_to_clean = torch.norm(delta_adv - clean_delta).item()
                 print(f"[Client {partition_id}][Round {current_round}] "
@@ -263,13 +264,12 @@ class FlowerClient(NumPyClient):
                     gamma=gamma,
                     keep_delta_norm=False,
                 )
-
-                vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
+                """
+                vector_to_parameters(final_vec.to(self.device), self.net.parameters())
                 self.prev_global_vec = init_vec.clone()
 
                 return get_weights(self.net), len(backdoor_training_set.dataset), {
                     "attack": "constrain-and-scale-krum-proxy",
-                    "gamma": gamma,
                     "clean_step": clean_step,
                     "attack_step": attack_step,
                 }
@@ -280,7 +280,7 @@ class FlowerClient(NumPyClient):
                 self.training_set,
                 benign_epochs,
                 self.device,
-                learning_rate
+                0.005
             )
 
             self.prev_global_vec = init_vec.clone()
