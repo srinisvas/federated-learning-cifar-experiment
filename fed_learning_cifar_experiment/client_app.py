@@ -31,6 +31,13 @@ class FlowerClient(NumPyClient):
         self.partition_id = str(self.context.node_config.get("partition-id"))
         self.prev_global_vec = None
 
+        # ---- Persistent malicious centroid (EMA) ----
+        if "malicious_centroid" not in self.client_state.config_records:
+            self.client_state.config_records["malicious_centroid"] = ConfigRecord({
+                "vec": None,
+                "alpha": 0.90,  # EMA decay
+            })
+
         if "num_backdoor_counts" not in self.client_state.config_records:
             self.client_state.config_records["num_backdoor_counts"] = ConfigRecord({"count": 0})
 
@@ -223,7 +230,7 @@ class FlowerClient(NumPyClient):
                     init_vec=init_vec.cpu(),
                     clean_delta=clean_delta,
                     ref_clean_deltas=ref_deltas,
-
+                    malicious_centroid=self.client_state.config_records["malicious_centroid"]["vec"],
                     epochs=attack_epochs,  # you set local_epochs=40 for attacker
                     lr=0.005,  # you set 0.01 for attacker
                     label_smoothing=0.0,
@@ -237,6 +244,16 @@ class FlowerClient(NumPyClient):
                     krum_k=7,  # if n=10 and f=1 => n-f-2=7, but proxy 3-5 is ok
                     min_norm_frac=0.10,
                 )
+
+                delta_adv = (final_vec - init_vec.cpu()).detach().cpu()
+
+                centroid_rec = self.client_state.config_records["malicious_centroid"]
+                alpha = centroid_rec["alpha"]
+
+                if centroid_rec["vec"] is None:
+                    centroid_rec["vec"] = delta_adv.clone()
+                else:
+                    centroid_rec["vec"] = alpha * centroid_rec["vec"] + (1 - alpha) * delta_adv
 
                 # 4) Krum-safe scaling: keep gamma SMALL
                 # Base it on clean_delta norm, NOT prev_global step.

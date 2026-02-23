@@ -105,8 +105,8 @@ def train_constrain_and_scale_krum_proxy(
     device,
     init_vec: torch.Tensor,                 # global weights w_t as vector
     clean_delta: torch.Tensor,              # delta_clean = w_clean - w_t (CPU or GPU ok)
-    ref_clean_deltas=None,                  # optional list[delta_ref] (CPU); if None, built internally
-
+    ref_clean_deltas=None,# optional list[delta_ref] (CPU); if None, built internally
+    malicious_centroid=None,
     # Optim
     epochs: int = 2,
     lr: float = 0.01,
@@ -194,6 +194,14 @@ def train_constrain_and_scale_krum_proxy(
 
             w = parameters_to_vector(net.parameters())              # [D]
             delta_adv = (w - g)                                     # [D]
+
+            # ---- Anchor loss: pull toward persistent malicious centroid ----
+            anchor_loss = torch.zeros((), device=device)
+
+            if malicious_centroid is not None:
+                centroid = malicious_centroid.to(device)
+                anchor_loss = torch.mean((delta_adv - centroid) ** 2)
+
             adv_norm = torch.norm(delta_adv) + eps
             adv_unit = delta_adv / adv_norm
 
@@ -224,8 +232,6 @@ def train_constrain_and_scale_krum_proxy(
             ref_mean = refs.mean(dim=0)
             centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
 
-            anchor_loss = torch.mean((delta_adv - ref_mean) ** 2)
-
             # (D2) KNN distances to refs
             diff = refs - delta_adv.unsqueeze(0)
             dists = torch.sum(diff * diff, dim=1)
@@ -241,13 +247,15 @@ def train_constrain_and_scale_krum_proxy(
 
             ce_weight = 1.0 if epoch < 1 else 0.1
 
+            anchor_w = 1.0 if epoch < 1 else 0.3
+
             loss = (
                     ce_weight * ce
                     + lambda_dir * dir_loss
                     + lambda_norm_match * norm_match
                     + lambda_centroid * centroid_loss
                     + lambda_krum_proxy * knn_loss
-                    #+ 0.5 * anchor_loss
+                    + anchor_w * anchor_loss
             )
 
             loss.backward()
