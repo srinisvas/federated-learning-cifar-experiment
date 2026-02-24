@@ -319,9 +319,6 @@ class FlowerClient(NumPyClient):
                     keep_delta_norm=False,
                 )
                 """
-                vector_to_parameters(final_vec.to(self.device), self.net.parameters())
-                self.prev_global_vec = init_vec.clone()
-
                 final_weights = [
                     v.detach().cpu().numpy()
                     for v in final_vec.view(-1).split(
