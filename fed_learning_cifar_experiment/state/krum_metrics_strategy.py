@@ -85,8 +85,11 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         # Flower may still call Strategy.evaluate (implemented in base classes).
         self._evaluate_fn_fallback = kwargs.get("evaluate_fn", None)
         self._initial_parameters_fallback = kwargs.get("initial_parameters", None)
+        self.attack_selection_mode = kwargs.get("attack_selection_mode", "random").lower()
         # Track previous global model (g_{t-1}) to send to clients
         self.prev_global_parameters: Optional[Parameters] = None
+        self.last_krum_selected_cid: Optional[str] = None
+        self.last_krum_selected_delta: Optional[np.ndarray] = None
 
     def _get_partition_id(self, client: ClientProxy) -> int:
         if client.cid in self._cid_to_partition:
@@ -130,12 +133,50 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
     ) -> List[Tuple[ClientProxy, FitIns]]:
         num_available = len(client_manager.all())
         sample_size, min_num = self.num_fit_clients(num_available)
-        sampled_clients = list(client_manager.sample(sample_size, min_num))
-        sampled_ids = [c.cid for c in sampled_clients]
 
-        # Randomly pick malicious clients from the sampled list
-        num_malicious = min(self.num_of_malicious_clients_per_round, len(sampled_ids))
-        malicious_ids = random.sample(sampled_ids, num_malicious)
+        all_clients = list(client_manager.all().values())
+
+        if self.attack_selection_mode == "persistent":
+            # ---- Fixed attacker pool ----
+            try:
+                cfg0 = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
+                raw = cfg0.get("malicious-client-ids", "[]")
+                malicious_pool = json.loads(raw) if isinstance(raw, str) else list(raw)
+            except Exception:
+                print(f"[Round {server_round}] Failed to parse malicious client IDs from config. Falling back to empty pool.")
+                malicious_pool = []
+
+            malicious_pool = set(str(cid) for cid in malicious_pool)
+
+            attacker_clients = [
+                c for c in all_clients if str(c.cid) in malicious_pool
+            ][: int(self.num_of_malicious_clients_per_round)]
+
+            attacker_cids = set(c.cid for c in attacker_clients)
+
+            benign_candidates = [
+                c for c in all_clients if c.cid not in attacker_cids
+            ]
+
+            remaining = max(0, sample_size - len(attacker_clients))
+            sampled_benign = random.sample(
+                benign_candidates, min(len(benign_candidates), remaining)
+            )
+
+            sampled_clients = attacker_clients + sampled_benign
+            malicious_ids = [c.cid for c in attacker_clients]
+
+        else:
+            # ---- RANDOM attack mode (baseline, unchanged) ----
+            sampled_clients = list(client_manager.sample(sample_size, min_num))
+            sampled_ids = [c.cid for c in sampled_clients]
+
+            num_malicious = min(
+                self.num_of_malicious_clients_per_round, len(sampled_ids)
+            )
+            malicious_ids = random.sample(sampled_ids, num_malicious)
+
+        sampled_ids = [c.cid for c in sampled_clients]
 
         fit_ins_list: List[Tuple[ClientProxy, FitIns]] = []
         print("Sampled clients for round {}: {}".format(server_round, sampled_ids))
@@ -150,6 +191,14 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                     "is_malicious": str(client.cid in malicious_ids),
                 }
             )
+
+            if self.attack_selection_mode == "persistent":
+                config["krum_selected_cid"] = self.last_krum_selected_cid
+                config["krum_ref_delta"] = (
+                    json.dumps(self.last_krum_selected_delta.tolist())
+                    if self.last_krum_selected_delta is not None
+                    else None
+                )
 
             if self.prev_global_parameters is not None:
                 config["prev_global_tensors_hex"] = json.dumps(
@@ -269,6 +318,22 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         selected_cid = min(scores, key=scores.get)
         selected_idx = client_ids.index(selected_cid)
         selected_params = results[selected_idx][1].parameters
+
+
+        # ---- Store Krum winner state (for next round) ----
+        self.last_krum_selected_cid = selected_cid
+
+        # Compute delta = w_selected - w_prev_global
+        if self.prev_global_parameters is not None:
+            prev_nds = parameters_to_ndarrays(self.prev_global_parameters)
+            curr_nds = parameters_to_ndarrays(selected_params)
+
+            prev_flat = np.concatenate([p.flatten() for p in prev_nds])
+            curr_flat = np.concatenate([p.flatten() for p in curr_nds])
+
+            self.last_krum_selected_delta = curr_flat - prev_flat
+        else:
+            self.last_krum_selected_delta = None
 
         selected_partition = self._get_partition_id(client_proxies[selected_idx])
 

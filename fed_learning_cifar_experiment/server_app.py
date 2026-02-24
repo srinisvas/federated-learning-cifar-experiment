@@ -27,6 +27,7 @@ def server_fn(context: Context):
     backdoor_attack_type = context.run_config.get("backdoor-attack-type", "train-and-scale").lower()
     num_of_malicious_clients = context.run_config.get("num-malicious-clients", 0)
     num_of_malicious_clients_per_round = context.run_config.get("num-malicious-clients-per-round", 1)
+    attack_selection_mode = context.run_config.get("attack-selection-mode", "random").lower()
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
     if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "train-and-scale":
         hardcoded_rounds = [1, 2]
@@ -73,6 +74,10 @@ def server_fn(context: Context):
                 "backdoor-attack-mode": "per-round-attack",
                 "backdoor-attack-type": backdoor_attack_type
             }
+            if context.run_config.get("attack-selection-mode", "random").lower() == "persistent":
+                on_fit_config["malicious-client-ids"] = context.run_config.get(
+                    "malicious-client-ids", "[]"
+                )
         return on_fit_config
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -128,8 +133,8 @@ def server_fn(context: Context):
             backdoor_attack_mode=backdoor_attack_mode,
             num_of_malicious_clients=num_of_malicious_clients,
             num_of_malicious_clients_per_round=num_of_malicious_clients_per_round,
-
-            num_byzantine=2,  # or num_of_malicious_clients_per_round
+            attack_selection_mode = attack_selection_mode,
+            num_byzantine=int(num_of_malicious_clients_per_round),  # or num_of_malicious_clients_per_round
         )
 
     elif aggregation_method == "multikrum":
@@ -149,7 +154,7 @@ def server_fn(context: Context):
             num_of_malicious_clients=num_of_malicious_clients,
             num_of_malicious_clients_per_round=num_of_malicious_clients_per_round,
 
-            num_byzantine=2,  # f
+            num_byzantine=int(num_of_malicious_clients_per_round),  # f
             num_clients_to_select=5,  # k
             normalize_updates=True,  # keep this on
         )

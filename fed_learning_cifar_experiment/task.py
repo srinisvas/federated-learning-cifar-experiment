@@ -99,6 +99,11 @@ def build_reference_clean_deltas(
 
     return refs
 
+def krum_score_proxy(delta, ref_deltas, k):
+    diffs = ref_deltas - delta.unsqueeze(0)
+    dists = torch.sum(diffs * diffs, dim=1)
+    return torch.topk(dists, k=min(k, len(dists)), largest=False).values.mean()
+
 def train_constrain_and_scale_krum_proxy(
     net,
     training_data,
@@ -120,6 +125,8 @@ def train_constrain_and_scale_krum_proxy(
     lambda_norm_match: float = 0.5,         # match ||delta_adv|| to ||delta_clean||
     lambda_krum_proxy: float = 0.5, # Krum score proxy weight
     lambda_centroid: float = 1.5,
+    malicious_centroid: torch.Tensor = None,
+    lambda_centroid_self: float = 0.3,
     # Krum proxy config
     krum_k: int = 7,                        # sum distances to K nearest reference deltas
     ref_scale: float = 1.0,                 # scale references (usually 1.0)
@@ -223,6 +230,11 @@ def train_constrain_and_scale_krum_proxy(
             # (D1) centroid of benign-like references
             ref_mean = refs.mean(dim=0)
             centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
+
+            if malicious_centroid is not None:
+                centroid_loss += lambda_centroid_self * torch.mean(
+                    (delta_adv - malicious_centroid.to(device)) ** 2
+                )
 
             # (D2) KNN distances to refs
             diff = refs - delta_adv.unsqueeze(0)

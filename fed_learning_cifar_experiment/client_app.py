@@ -33,12 +33,23 @@ class FlowerClient(NumPyClient):
 
         if "num_backdoor_counts" not in self.client_state.config_records:
             self.client_state.config_records["num_backdoor_counts"] = ConfigRecord({"count": 0})
+        if "malicious_centroid" not in self.client_state.config_records:
+            self.client_state.config_records["malicious_centroid"] = ConfigRecord({
+                "vec": [],
+                "alpha": 0.9,
+            })
 
     def get_properties(self, config):
         return {"partition_id": str(self.context.node_config["partition-id"])}
 
 
     def fit(self, parameters, config):
+        krum_ref_delta = None
+        if "krum_ref_delta" in config and config["krum_ref_delta"] is not None:
+            krum_ref_delta = torch.tensor(
+                json.loads(config["krum_ref_delta"]),
+                dtype=torch.float32,
+            )
         benign_epochs = 5
         attack_epochs = self.local_epochs
         set_weights(self.net, parameters)
@@ -223,7 +234,7 @@ class FlowerClient(NumPyClient):
                     init_vec=init_vec.cpu(),
                     clean_delta=clean_delta,
                     ref_clean_deltas=ref_deltas,
-
+                    krum_ref_delta=krum_ref_delta,
                     epochs=attack_epochs,  # you set local_epochs=40 for attacker
                     lr=0.005,  # you set 0.01 for attacker
                     label_smoothing=0.0,
@@ -311,7 +322,7 @@ def client_fn(context: Context):
     partition_id = context.node_config["partition-id"]
     client = FlowerClient(net, local_epochs, context)
 
-    client.cid = str(partition_id)
+    #client.cid = str(partition_id)
     #print(f"Initialized client with partition ID: {partition_id} (CID set to {client.cid})")
     # Return Client instance
     return client.to_client()
