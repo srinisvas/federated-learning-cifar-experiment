@@ -89,6 +89,25 @@ class FlowerClient(NumPyClient):
         current_round = config.get("current-round", "N/A")
         partition_id = self.context.node_config["partition-id"]
 
+        krum_selected_cid = config.get("krum_selected_cid", None)
+        is_selected_by_krum = (
+                krum_selected_cid is not None
+                and str(partition_id) == str(krum_selected_cid)
+        )
+
+        krum_ref_delta = None
+        try:
+            ref = config.get("krum_ref_delta", None)
+            if ref is not None:
+                if isinstance(ref, str):
+                    ref = json.loads(ref)
+                if isinstance(ref, list) and len(ref) > 0:
+                    krum_ref_delta = torch.tensor(
+                        ref, dtype=torch.float32, device=self.device
+                    )
+        except Exception:
+            krum_ref_delta = None
+
         #print(f"[Client {partition_id}] Round {current_round}")
         #print(f"[Client {partition_id}] Is malicious? {is_malicious}")
         #print(f"[Client {partition_id}] Sampled clients: {sampled_client_ids}")
@@ -210,17 +229,28 @@ class FlowerClient(NumPyClient):
 
                 shared_seed = int(config.get("current-round", 0)) * 1000
 
-                ref_deltas = build_reference_clean_deltas(
-                    net=net_ref,  # base architecture (untrained clone is fine)
-                    training_data=clean_training_set,
-                    device=self.device,
-                    init_vec=init_vec.cpu(),
-                    epochs=1,
-                    lr=0.005,
-                    num_refs=16,
-                    seed_base=shared_seed,
-                    label_smoothing=0.05,
-                )
+                ref_key = "ref_clean_deltas"
+                if ref_key not in self.client_state.config_records:
+                    ref_deltas = build_reference_clean_deltas(
+                        net=net_ref,
+                        training_data=clean_training_set,
+                        device=self.device,
+                        init_vec=init_vec.cpu(),
+                        epochs=1,
+                        lr=0.005,
+                        num_refs=16,
+                        seed_base=shared_seed,
+                        label_smoothing=0.05,
+                    )
+                    self.client_state.config_records[ref_key] = ConfigRecord({
+                        "deltas": [d.detach().cpu().tolist() for d in ref_deltas],
+                    })
+                else:
+                    stored = self.client_state.config_records[ref_key]["deltas"]
+                    ref_deltas = [
+                        torch.tensor(x, dtype=torch.float32)
+                        for x in stored
+                    ]
 
                 # 3) Run constrained backdoor training using the BACKDOOR loader
                 final_vec = train_constrain_and_scale_krum_proxy(
@@ -231,17 +261,18 @@ class FlowerClient(NumPyClient):
                     clean_delta=clean_delta,
                     ref_clean_deltas=ref_deltas,
                     malicious_centroid=self.client_state.config_records["malicious_centroid"]["vec"],
-                    epochs=attack_epochs,  # you set local_epochs=40 for attacker
-                    lr=0.005,  # you set 0.01 for attacker
+                    krum_ref_delta=krum_ref_delta,
+                    epochs=attack_epochs,
+                    lr=0.005,
                     label_smoothing=0.0,
                     weight_decay=0.0,
-
                     lambda_match_clean=1.0,
                     lambda_dir=0.2,
                     lambda_norm_match=0.2,
                     lambda_krum_proxy=1.0,
-
-                    krum_k=7,  # if n=10 and f=1 => n-f-2=7, but proxy 3-5 is ok
+                    lambda_krum_align=2.0,
+                    lambda_norm_guard=0.5,
+                    krum_k=7,
                     min_norm_frac=0.10,
                 )
 
@@ -250,12 +281,13 @@ class FlowerClient(NumPyClient):
                 centroid_rec = self.client_state.config_records["malicious_centroid"]
                 alpha = centroid_rec["alpha"]
 
-                if len(centroid_rec["vec"]) == 0:
-                    centroid_rec["vec"] = delta_adv.detach().cpu().tolist()
-                else:
-                    prev = torch.tensor(centroid_rec["vec"], device=delta_adv.device)
-                    updated = alpha * prev + (1 - alpha) * delta_adv
-                    centroid_rec["vec"] = updated.detach().cpu().tolist()
+                if is_selected_by_krum:
+                    if len(centroid_rec["vec"]) == 0:
+                        centroid_rec["vec"] = delta_adv.detach().cpu().tolist()
+                    else:
+                        prev = torch.tensor(centroid_rec["vec"], device=delta_adv.device)
+                        updated = alpha * prev + (1 - alpha) * delta_adv
+                        centroid_rec["vec"] = updated.detach().cpu().tolist()
 
                 # 4) Krum-safe scaling: keep gamma SMALL
                 # Base it on clean_delta norm, NOT prev_global step.

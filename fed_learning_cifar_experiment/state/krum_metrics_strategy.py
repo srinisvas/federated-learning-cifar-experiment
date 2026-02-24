@@ -87,6 +87,8 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         self._initial_parameters_fallback = kwargs.get("initial_parameters", None)
         # Track previous global model (g_{t-1}) to send to clients
         self.prev_global_parameters: Optional[Parameters] = None
+        self.last_krum_selected_cid: Optional[str] = None
+        self.last_krum_selected_delta: Optional[np.ndarray] = None
 
     def _get_partition_id(self, client: ClientProxy) -> int:
         if client.cid in self._cid_to_partition:
@@ -148,6 +150,12 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                     "sampled_client_ids": json.dumps(sampled_ids),
                     "malicious_client_ids": json.dumps(malicious_ids),
                     "is_malicious": str(client.cid in malicious_ids),
+                    "krum_selected_cid": self.last_krum_selected_cid,
+                    "krum_ref_delta": (
+                        json.dumps(self.last_krum_selected_delta.tolist())
+                        if self.last_krum_selected_delta is not None
+                        else None
+                    ),
                 }
             )
 
@@ -219,6 +227,11 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         if not results or failures:
             return super().aggregate_fit(rnd, results, failures)
 
+        prev_global_flat = None
+        if self.prev_global_parameters is not None:
+            prev_nds = parameters_to_ndarrays(self.prev_global_parameters)
+            prev_global_flat = np.concatenate([p.flatten() for p in prev_nds])
+
         # ---- Extract updates ----
         client_ids = []
         client_updates = []
@@ -270,6 +283,12 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         selected_idx = client_ids.index(selected_cid)
         selected_params = results[selected_idx][1].parameters
 
+        selected_delta = None
+        if prev_global_flat is not None:
+            sel_nds = parameters_to_ndarrays(selected_params)
+            sel_flat = np.concatenate([p.flatten() for p in sel_nds])
+            selected_delta = sel_flat - prev_global_flat
+
         selected_partition = self._get_partition_id(client_proxies[selected_idx])
 
         print(
@@ -279,6 +298,8 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
 
         # ---- Maintain your existing behavior ----
         self.prev_global_parameters = selected_params
+        self.last_krum_selected_cid = selected_cid
+        self.last_krum_selected_delta = selected_delta
 
         # ---- Return in Flower-compatible format ----
         # Use Flower’s expected return type: (Parameters, metrics)

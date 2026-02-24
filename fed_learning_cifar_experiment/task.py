@@ -107,6 +107,7 @@ def train_constrain_and_scale_krum_proxy(
     clean_delta: torch.Tensor,              # delta_clean = w_clean - w_t (CPU or GPU ok)
     ref_clean_deltas=None,# optional list[delta_ref] (CPU); if None, built internally
     malicious_centroid=None,
+    krum_ref_delta: torch.Tensor = None,
     # Optim
     epochs: int = 2,
     lr: float = 0.01,
@@ -119,6 +120,8 @@ def train_constrain_and_scale_krum_proxy(
     lambda_dir: float = 0.2,                # align direction with delta_clean
     lambda_norm_match: float = 0.5,         # match ||delta_adv|| to ||delta_clean||
     lambda_krum_proxy: float = 0.5, # Krum score proxy weight
+    lambda_krum_align: float = 0.0,
+    lambda_norm_guard: float = 0.0,
     lambda_centroid: float = 1.5,
     # Krum proxy config
     krum_k: int = 7,                        # sum distances to K nearest reference deltas
@@ -169,6 +172,10 @@ def train_constrain_and_scale_krum_proxy(
 
     # Stack refs as tensor on device for fast distance computation
     refs = torch.stack([d * ref_scale for d in ref_clean_deltas], dim=0).to(device)  # [M, D]
+
+    if krum_ref_delta is not None:
+        krum_ref = krum_ref_delta.detach().to(device).unsqueeze(0)
+        refs = torch.cat([krum_ref, refs], dim=0)
 
     # Targets from clean delta
     clean_delta_dev = clean_delta_cpu.to(device)
@@ -221,6 +228,18 @@ def train_constrain_and_scale_krum_proxy(
             # disable direction loss for strict Krum
             dir_loss = torch.zeros((), device=device)
 
+            krum_align = torch.zeros((), device=device)
+
+            if krum_ref_delta is not None:
+                ref = krum_ref_delta.to(device)
+                ref_norm = torch.norm(ref) + eps
+                ref_unit = ref / ref_norm
+
+                cos = torch.dot(adv_unit, ref_unit).clamp(-1.0, 1.0)
+                dir_loss = (1.0 - cos)
+
+                krum_align = torch.mean((delta_adv - ref) ** 2)
+
             # (C) norm matching to clean update magnitude
             if torch.isfinite(clean_norm):
                 norm_match = (adv_norm - clean_norm) ** 2
@@ -250,13 +269,33 @@ def train_constrain_and_scale_krum_proxy(
 
             anchor_w = 0.3 if epoch < 1 else 1.0
 
+            ref_norms = torch.norm(refs, dim=1)
+            target_norm = ref_norms.median().detach()
+            lo = 0.95 * target_norm
+            hi = 1.05 * target_norm
+
+            norm_guard = (
+                F.relu(lo - adv_norm) ** 2
+                + F.relu(adv_norm - hi) ** 2
+            )
+
+            if epoch == 0:
+                lambda_match_clean_eff = lambda_match_clean  # full strength
+            elif epoch == 1:
+                lambda_match_clean_eff = 0.3 * lambda_match_clean  # decay
+            else:
+                lambda_match_clean_eff = 0.0  # off
+
             loss = (
                     ce_weight * ce
                     + lambda_dir * dir_loss
                     + lambda_norm_match * norm_match
                     + lambda_centroid * centroid_loss
                     + lambda_krum_proxy * knn_loss
+                    + lambda_krum_align * krum_align
+                    + lambda_norm_guard * norm_guard
                     + anchor_w * anchor_loss
+                    + lambda_match_clean_eff * match_clean
             )
 
             loss.backward()
@@ -285,6 +324,7 @@ def train_constrain_and_scale_krum_proxy(
     final_vec = parameters_to_vector(net.parameters()).detach().cpu()
     delta_final = final_vec - init_vec_cpu
 
+    """
     # Update malicious centroid (EMA-style)
     if malicious_centroid is not None:
         delta_list = delta_final.tolist()
@@ -295,7 +335,8 @@ def train_constrain_and_scale_krum_proxy(
             alpha = 0.90
             prev = torch.tensor(malicious_centroid)
             new = alpha * prev + (1 - alpha) * delta_final
-            malicious_centroid[:] = new.tolist()
+            malicious_centroid[:] = new.tolist()     
+    """
 
     return final_vec.clone()
 
