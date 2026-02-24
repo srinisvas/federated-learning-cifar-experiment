@@ -110,8 +110,8 @@ def train_constrain_and_scale_krum_proxy(
     device,
     init_vec: torch.Tensor,                 # global weights w_t as vector
     clean_delta: torch.Tensor,              # delta_clean = w_clean - w_t (CPU or GPU ok)
-    ref_clean_deltas=None,                  # optional list[delta_ref] (CPU); if None, built internally
-
+    ref_clean_deltas=None,                  # optional list[delta_ref] (CPU); if None, built internally'
+    krum_ref_delta: torch.Tensor = None,
     # Optim
     epochs: int = 2,
     lr: float = 0.01,
@@ -231,7 +231,16 @@ def train_constrain_and_scale_krum_proxy(
             ref_mean = refs.mean(dim=0)
             centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
 
-            if malicious_centroid is not None:
+            if krum_ref_delta is not None:
+                krum_ref_delta = krum_ref_delta.to(device)
+                centroid_loss += lambda_centroid_self * torch.mean(
+                    (delta_adv - krum_ref_delta) ** 2
+                )
+
+            if (
+                    malicious_centroid is not None
+                    and krum_ref_delta is None
+            ):
                 centroid_loss += lambda_centroid_self * torch.mean(
                     (delta_adv - malicious_centroid.to(device)) ** 2
                 )
