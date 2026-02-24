@@ -150,13 +150,17 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                     "sampled_client_ids": json.dumps(sampled_ids),
                     "malicious_client_ids": json.dumps(malicious_ids),
                     "is_malicious": str(client.cid in malicious_ids),
-                    "krum_selected_cid": self.last_krum_selected_cid,
-                    "krum_ref_delta": (
-                        json.dumps(self.last_krum_selected_delta.tolist())
-                        if self.last_krum_selected_delta is not None
-                        else None
-                    ),
                 }
+            )
+
+            config["krum_selected_cid"] = (
+                str(self.last_krum_selected_cid) if self.last_krum_selected_cid is not None else ""
+            )
+
+            config["krum_ref_delta"] = (
+                json.dumps(self.last_krum_selected_delta.tolist())
+                if self.last_krum_selected_delta is not None
+                else "[]"
             )
 
             if self.prev_global_parameters is not None:
