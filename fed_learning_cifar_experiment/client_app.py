@@ -356,7 +356,7 @@ class FlowerClient(NumPyClient):
 
             self.prev_global_vec = init_vec.clone()
 
-            return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
+            return get_weights(self.net), len(self.training_set.dataset), {"train_loss": to_py(train_loss)}
 
     def evaluate(self, parameters, config):
         partition_id = self.context.node_config["partition-id"]
