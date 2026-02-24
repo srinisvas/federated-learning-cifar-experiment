@@ -322,7 +322,16 @@ class FlowerClient(NumPyClient):
                 vector_to_parameters(final_vec.to(self.device), self.net.parameters())
                 self.prev_global_vec = init_vec.clone()
 
-                return get_weights(self.net), len(backdoor_training_set.dataset), {
+                final_weights = [
+                    v.detach().cpu().numpy()
+                    for v in final_vec.view(-1).split(
+                        [p.numel() for p in self.net.parameters()]
+                    )
+                ]
+
+                self.prev_global_vec = init_vec.clone()
+
+                return final_weights, len(backdoor_training_set.dataset), {
                     "attack": "constrain-and-scale-krum-proxy",
                     "clean_step": clean_step,
                     "attack_step": attack_step,
