@@ -1,107 +1,121 @@
 import json
 import random
+import inspect
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import flwr as fl
-from flwr.common import FitIns, Parameters
-from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
+from flwr.common import FitIns, Parameters, GetPropertiesIns
 from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
+from flwr.common import parameters_to_ndarrays, ndarrays_to_parameters
 
-from fed_learning_cifar_experiment.utils.logger import (
-    append_distributed_round,
-    write_experiment_summary,
-)
 
-class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
+# -----------------------------------------------------------------------------
+# Import base strategy (version/location tolerant)
+# -----------------------------------------------------------------------------
+try:
+    # If this file lives next to krum_metrics_strategy.py
+    from .krum_metrics_strategy import SaveKrumMetricsStrategy
+except Exception:
+    try:
+        # If your project imports it via module path
+        from fed_learning_cifar_experiment.krum_metrics_strategy import SaveKrumMetricsStrategy  # type: ignore
+    except Exception:
+        # Fallback: same directory / PYTHONPATH
+        from krum_metrics_strategy import SaveKrumMetricsStrategy  # type: ignore
+
+
+class SaveMultiKrumMetricsStrategy(SaveKrumMetricsStrategy):
+    """
+    Multi-Krum variant that mirrors SaveKrumMetricsStrategy except for aggregation:
+
+    - Selection: compute Krum scores for all clients (same as SaveKrumMetricsStrategy)
+    - Choose top-k lowest-score clients (k = num_clients_to_select)
+    - Aggregate: safe layer-wise average over those k selected parameter sets
+
+    The strategy still provides:
+    - identical configure_fit sampling and malicious marking
+    - persistent attacker pool behavior
+    - krum_selected_cid / krum_ref_delta fields for client-side proxy logic
+      (using the *canonical* winner = lowest-score among selected top-k)
+    """
 
     def __init__(
         self,
-        simulation_id: str = "",
-        num_clients: int = 0,
-        num_rounds: int = 0,
-        aggregation_method: str = "",
-        backdoor_attack_mode: str = "",
-        num_of_malicious_clients: int = 0,
-        num_of_malicious_clients_per_round: int = 0,
-        num_byzantine: int = 0,
+        *,
         num_clients_to_select: int = 1,
-        normalize_updates: bool = True,
-        eps: float = 1e-12,
         **kwargs: Any,
     ):
+        # Keep base init fully intact
         super().__init__(**kwargs)
 
-        self.simulation_id = simulation_id
-        self.num_clients = num_clients
-        self.num_rounds = num_rounds
-        self.aggregation_method = aggregation_method
-        self.backdoor_attack_mode = backdoor_attack_mode
-
-        self.history = {"round": [], "mta": [], "asr": []}
-        self.central_mta_history: List[float] = []
-        self.central_asr_history: List[float] = []
-        self.final_centralized_mta: Optional[float] = None
-        self.final_centralized_asr: Optional[float] = None
-
-        self.num_of_malicious_clients = int(num_of_malicious_clients)
-        self.num_of_malicious_clients_per_round = int(num_of_malicious_clients_per_round)
-
-        self.num_byzantine = int(num_byzantine)
+        # Multi-Krum only parameter (top-k)
         self.num_clients_to_select = int(num_clients_to_select)
 
-        self.normalize_updates = bool(normalize_updates)
-        self.eps = float(eps)
-
-        self._global_parameters_for_round: Optional[Parameters] = None
-        # Track previous global model (g_{t-1}) to send to clients
-        self.prev_global_parameters: Optional[Parameters] = None
-
-    # -------------------------------------------------------
-    # Utility helpers
-    # -------------------------------------------------------
-
-    @staticmethod
-    def _is_float_arr(a: np.ndarray) -> bool:
-        return np.issubdtype(a.dtype, np.floating)
-
-    @staticmethod
-    def _is_int_or_bool_arr(a: np.ndarray) -> bool:
-        return np.issubdtype(a.dtype, np.integer) or np.issubdtype(a.dtype, np.bool_)
-
-    @classmethod
-    def _flatten_float_only(cls, nds: List[np.ndarray]) -> np.ndarray:
-        flats: List[np.ndarray] = []
-        for a in nds:
-            a = np.asarray(a)
-            if cls._is_float_arr(a):
-                flats.append(a.ravel().astype(np.float64, copy=False))
-        if not flats:
-            return np.zeros((0,), dtype=np.float64)
-        return np.concatenate(flats, axis=0)
-
-    # -------------------------------------------------------
-    # configure_fit (unchanged behavior)
-    # -------------------------------------------------------
+        # Server-only (not sent to clients): track malicious IDs used in the most recent configure_fit
+        self._last_round_malicious_ids: List[str] = []
 
     def configure_fit(
         self,
         server_round: int,
         parameters: Parameters,
         client_manager: ClientManager,
-    ):
-        self._global_parameters_for_round = parameters
-
+    ) -> List[Tuple[ClientProxy, FitIns]]:
         num_available = len(client_manager.all())
         sample_size, min_num = self.num_fit_clients(num_available)
-        sampled_clients = list(client_manager.sample(sample_size, min_num))
+
+        all_clients = list(client_manager.all().values())
+
+        if self.attacker_selection_mode == "persistent":
+            # ---- Fixed attacker pool ----
+            try:
+                cfg0 = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
+                raw = cfg0.get("malicious-client-ids", "[]")
+                malicious_pool = json.loads(raw) if isinstance(raw, str) else list(raw)
+            except Exception:
+                print(f"[Round {server_round}] Failed to parse malicious client IDs from config. Falling back to empty pool.")
+                malicious_pool = []
+
+            malicious_pool = set(str(cid) for cid in malicious_pool)
+
+            attacker_clients = [
+                c for c in all_clients if str(c.cid) in malicious_pool
+            ][: int(self.num_of_malicious_clients_per_round)]
+
+            attacker_cids = set(c.cid for c in attacker_clients)
+
+            benign_candidates = [
+                c for c in all_clients if c.cid not in attacker_cids
+            ]
+
+            remaining = max(0, sample_size - len(attacker_clients))
+            sampled_benign = random.sample(
+                benign_candidates, min(len(benign_candidates), remaining)
+            )
+
+            sampled_clients = attacker_clients + sampled_benign
+            malicious_ids = [c.cid for c in attacker_clients]
+
+        else:
+            # ---- RANDOM attack mode (baseline, unchanged) ----
+            sampled_clients = list(client_manager.sample(sample_size, min_num))
+            sampled_ids = [c.cid for c in sampled_clients]
+
+            num_malicious = min(
+                self.num_of_malicious_clients_per_round, len(sampled_ids)
+            )
+            malicious_ids = random.sample(sampled_ids, num_malicious)
+
         sampled_ids = [c.cid for c in sampled_clients]
 
-        num_malicious = min(self.num_of_malicious_clients_per_round, len(sampled_ids))
-        malicious_ids = random.sample(sampled_ids, num_malicious)
+        # Server-only tracking (no additional leakage to clients)
+        self._last_round_malicious_ids = list(map(str, malicious_ids))
 
-        fit_ins_list = []
+        fit_ins_list: List[Tuple[ClientProxy, FitIns]] = []
+        print("Sampled clients for round {}: {}".format(server_round, sampled_ids))
+        print("Malicious clients for round {}: {}".format(server_round, malicious_ids))
         for client in sampled_clients:
             config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
             config.update(
@@ -112,6 +126,17 @@ class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
                     "is_malicious": str(client.cid in malicious_ids),
                 }
             )
+
+            # Keep same persistent-mode feedback keys, even for Multi-Krum
+            if self.attacker_selection_mode == "persistent":
+                config["krum_selected_cid"] = self.last_krum_selected_cid
+                config["krum_ref_delta"] = (
+                    json.dumps(self.last_krum_selected_delta.tolist())
+                    if self.last_krum_selected_delta is not None
+                    else None
+                )
+
+            # Keep prev_global propagation identical
             if self.prev_global_parameters is not None:
                 config["prev_global_tensors_hex"] = json.dumps(
                     [t.hex() for t in self.prev_global_parameters.tensors]
@@ -125,179 +150,122 @@ class SaveMultiKrumMetricsStrategy(fl.server.strategy.FedAvg):
 
         return fit_ins_list
 
-    # -------------------------------------------------------
-    # Multi-Krum core (FIXED)
-    # -------------------------------------------------------
+    @staticmethod
+    def _is_float_arr(a: np.ndarray) -> bool:
+        return np.issubdtype(a.dtype, np.floating)
 
-    def aggregate_fit(self, server_round: int, results, failures):
+    @staticmethod
+    def _is_int_or_bool_arr(a: np.ndarray) -> bool:
+        return np.issubdtype(a.dtype, np.integer) or np.issubdtype(a.dtype, np.bool_)
 
-        if not results:
-            return None, {}
+    def aggregate_fit(self, rnd: int, results, failures):
+        # Keep Flower edge-case behavior consistent with base
+        if not results or failures:
+            return super().aggregate_fit(rnd, results, failures)
 
-        f = self.num_byzantine
-        n = len(results)
-
-        if n <= 2 * f + 2:
-            print(f"[Round {server_round}] Falling back to FedAvg (n={n}, f={f})")
-            aggregated = super().aggregate_fit(server_round, results, failures)
-            if aggregated and aggregated[0] is not None:
-                self.prev_global_parameters = self._global_parameters_for_round
-                self._global_parameters_for_round = aggregated[0]
-
-            return aggregated
-
-        if self._global_parameters_for_round is None:
-            aggregated = super().aggregate_fit(server_round, results, failures)
-            if aggregated and aggregated[0] is not None:
-                self.prev_global_parameters = self._global_parameters_for_round
-                self._global_parameters_for_round = aggregated[0]
-
-            return aggregated
-
-        global_nds = [np.asarray(a) for a in parameters_to_ndarrays(self._global_parameters_for_round)]
-        global_vec = self._flatten_float_only(global_nds)
-
-        if global_vec.size == 0:
-            aggregated = super().aggregate_fit(server_round, results, failures)
-            if aggregated and aggregated[0] is not None:
-                self.prev_global_parameters = self._global_parameters_for_round
-                self._global_parameters_for_round = aggregated[0]
-
-            return aggregated
-
-        client_params_nds = []
-        client_update_vecs = []
-        client_cids = []
+        # ---- Extract client parameter vectors (SAME AS KRUM) ----
+        client_ids: List[str] = []
+        client_params_nds: List[List[np.ndarray]] = []
+        client_updates_flat: List[np.ndarray] = []
+        client_proxies: List[ClientProxy] = []
 
         for client_proxy, fit_res in results:
-            nds = [np.asarray(a) for a in parameters_to_ndarrays(fit_res.parameters)]
-            vec = self._flatten_float_only(nds)
-            update_vec = vec - global_vec
+            nds = parameters_to_ndarrays(fit_res.parameters)
+            flat = np.concatenate([np.asarray(p).ravel() for p in nds])
+            client_updates_flat.append(flat)
+            client_params_nds.append([np.asarray(p) for p in nds])
+            client_ids.append(str(client_proxy.cid))
+            client_proxies.append(client_proxy)
 
-            if self.normalize_updates:
-                norm = float(np.linalg.norm(update_vec))
-                update_vec = update_vec / (norm + self.eps)
+        X = np.stack(client_updates_flat)
+        n = len(X)
 
-            client_params_nds.append(nds)
-            client_update_vecs.append(update_vec)
-            client_cids.append(getattr(client_proxy, "cid", "unknown"))
+        # Byzantine count (version-safe, SAME AS KRUM)
+        f = getattr(self, "num_byzantine", None)
+        if f is None:
+            f = getattr(self, "num_malicious_clients", 0)
 
-        m = n - f - 2
-        dists = np.zeros((n, n), dtype=np.float64)
+        k_neigh = n - int(f) - 2
+        if k_neigh <= 0:
+            raise RuntimeError(f"Invalid Krum config: n={n}, f={f}")
 
+        # ---- Compute Krum scores (SAME AS KRUM) ----
+        scores: Dict[str, float] = {}
         for i in range(n):
-            ui = client_update_vecs[i]
-            for j in range(i + 1, n):
-                diff = ui - client_update_vecs[j]
-                dist = float(np.dot(diff, diff))
-                dists[i, j] = dist
-                dists[j, i] = dist
+            dists = []
+            for j in range(n):
+                if i == j:
+                    continue
+                dists.append(float(np.linalg.norm(X[i] - X[j]) ** 2))
+            scores[client_ids[i]] = float(sum(sorted(dists)[:k_neigh]))
 
-        scores = np.zeros(n, dtype=np.float64)
-        for i in range(n):
-            row = np.delete(dists[i], i)
-            row.sort()
-            scores[i] = float(np.sum(row[:m]))
+        # ---- Print scores (SAME FORMAT AS KRUM) ----
+        print(f"\n[Round {rnd}][Krum Scores]")
+        for cid in sorted(scores, key=scores.get):
+            proxy = next(p for p in client_proxies if str(p.cid) == cid)
+            pid = self._get_partition_id(proxy)
+            print(
+                f"  CID={cid:>6} | "
+                f"Partition={pid:>3} | "
+                f"Score={scores[cid]:.6e}"
+            )
 
-        k = max(1, min(self.num_clients_to_select, n))
-        selected_idx = np.argsort(scores)[:k].tolist()
-        selected_cids = [client_cids[i] for i in selected_idx]
+        # ---- Multi-Krum selection: top-k lowest-score ----
+        k = int(self.num_clients_to_select)
+        k = max(1, min(k, n))
+        sorted_cids = sorted(scores, key=scores.get)
+        selected_cids = sorted_cids[:k]
+        selected_idx = [client_ids.index(cid) for cid in selected_cids]
 
+        # Canonical representative for persistent attacker feedback (lowest-score)
+        canonical_cid = selected_cids[0]
+        canonical_idx = selected_idx[0]
+
+        # Server-side logging only (no new leakage)
+        is_attacker_selected = any(str(cid) in set(self._last_round_malicious_ids) for cid in selected_cids)
         print(
-            f"[Round {server_round}] Multi-Krum selected k={k}/{n} "
-            f"(f={f}, m={m}). Selected CIDs={selected_cids}"
+            f"[Round {rnd}][Multi-Krum Selected] "
+            f"k={k}/{n} | Canonical={canonical_cid} | Selected={selected_cids} | "
+            f"Attacker selected={is_attacker_selected}\n"
         )
 
-        is_attacker_selected = any(
-            cid in self._last_round_malicious_ids for cid in selected_cids
-        )
+        # ---- Store Krum-like winner state for next-round proxy logic ----
+        self.last_krum_selected_cid = canonical_cid
 
-        print(
-            f"[Round {server_round}][Multi-Krum] "
-            f"Attacker selected={is_attacker_selected}"
-        )
+        # delta = w_canonical - w_prev_global (SAME INTENT AS KRUM)
+        if self.prev_global_parameters is not None:
+            prev_nds = parameters_to_ndarrays(self.prev_global_parameters)
+            prev_flat = np.concatenate([np.asarray(p).ravel() for p in prev_nds])
 
-        # -------- SAFE AGGREGATION --------
+            curr_flat = client_updates_flat[canonical_idx]
+            self.last_krum_selected_delta = curr_flat - prev_flat
+        else:
+            self.last_krum_selected_delta = None
 
-        template = client_params_nds[selected_idx[0]]
-        agg_nds = []
+        # ---- SAFE AGGREGATION: layer-wise mean over selected clients ----
+        template = client_params_nds[canonical_idx]
+        agg_nds: List[np.ndarray] = []
 
         for layer_idx, base in enumerate(template):
-            base = np.asarray(base)
+            base_arr = np.asarray(base)
 
-            if self._is_int_or_bool_arr(base):
-                agg_nds.append(base.copy())
+            if self._is_int_or_bool_arr(base_arr):
+                # preserve int/bool layers exactly
+                agg_nds.append(base_arr.copy())
                 continue
 
-            acc = np.zeros(base.shape, dtype=np.float64)
+            # float / mixed numeric layers: average in float64, cast back
+            acc = np.zeros(base_arr.shape, dtype=np.float64)
             for i in selected_idx:
                 layer = np.asarray(client_params_nds[i][layer_idx])
                 acc += layer.astype(np.float64, copy=False)
 
             acc /= float(k)
-            agg_nds.append(acc.astype(base.dtype, copy=False))
+            agg_nds.append(acc.astype(base_arr.dtype, copy=False))
 
         new_parameters = ndarrays_to_parameters(agg_nds)
-        self._global_parameters_for_round = new_parameters
 
-        self.prev_global_parameters = self._global_parameters_for_round
-        self._global_parameters_for_round = new_parameters
+        # ---- Maintain base behavior: prev_global is the model we will send as g_{t-1} next round ----
+        self.prev_global_parameters = new_parameters
 
         return new_parameters, {}
-
-    # -------------------------------------------------------
-    # Evaluation (unchanged)
-    # -------------------------------------------------------
-
-    def aggregate_evaluate(self, rnd, results, failures):
-        metrics = super().aggregate_evaluate(rnd, results, failures)
-
-        mta_vals = [res.metrics.get("mta", 0.0) for _, res in results]
-        asr_vals = [res.metrics.get("asr", 0.0) for _, res in results]
-
-        avg_mta = sum(mta_vals) / len(mta_vals) if mta_vals else 0.0
-        avg_asr = sum(asr_vals) / len(asr_vals) if asr_vals else 0.0
-
-        self.history["round"].append(rnd)
-        self.history["mta"].append(avg_mta)
-        self.history["asr"].append(avg_asr)
-
-        print(f"[Round {rnd}] MTA={avg_mta:.4f}, ASR={avg_asr:.4f}")
-
-        dist_loss = metrics[0] if metrics else None
-        append_distributed_round(
-            self.simulation_id,
-            rnd,
-            avg_mta,
-            avg_asr,
-            dist_loss,
-            self.num_clients,
-        )
-
-        if rnd >= self.num_rounds:
-            write_experiment_summary(
-                simulation_id=self.simulation_id,
-                meta={
-                    "aggregation": str(self.aggregation_method),
-                    "num_rounds": str(self.num_rounds),
-                    "num_malicious_clients": str(self.num_clients),
-                    "backdoor_attack_mode": str(self.backdoor_attack_mode),
-                    "alpha": 0.9,
-                },
-                final_centralized_mta=self.final_centralized_mta or 0.0,
-                final_centralized_asr=self.final_centralized_asr or 0.0,
-                dist_mta_history=self.history.get("mta", []),
-                dist_asr_history=self.history.get("asr", []),
-                central_mta_history=self.central_mta_history,
-                central_asr_history=self.central_asr_history,
-                notes="",
-            )
-
-        return metrics
-
-    def record_centralized_eval(self, rnd, loss, mta, asr):
-        self.central_mta_history.append(mta)
-        self.central_asr_history.append(asr)
-        if rnd == self.num_rounds:
-            self.final_centralized_mta = mta
-            self.final_centralized_asr = asr
