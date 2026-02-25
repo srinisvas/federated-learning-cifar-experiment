@@ -27,7 +27,7 @@ def server_fn(context: Context):
     backdoor_attack_type = context.run_config.get("backdoor-attack-type", "train-and-scale").lower()
     num_of_malicious_clients = context.run_config.get("num-malicious-clients", 0)
     num_of_malicious_clients_per_round = context.run_config.get("num-malicious-clients-per-round", 1)
-    attack_selection_mode = context.run_config.get("attack-selection-mode", "random").lower()
+    attacker_selection_mode = context.run_config.get("attacker-selection-mode", "random").lower()
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
     if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "train-and-scale":
         hardcoded_rounds = [1, 2]
@@ -40,7 +40,7 @@ def server_fn(context: Context):
     # Initialize model parameter
 
     model = get_resnet_cnn_model()
-    print("Attack Selection Mode:", attack_selection_mode)
+    print("Attack Selection Mode:", attacker_selection_mode)
     if torch.cuda.is_available() and os.path.exists("pretrained_cifar_bw8.pth"):
         print("Loading pretrained global model...")
         model.load_state_dict(torch.load("pretrained_cifar_bw8.pth", map_location="cpu"))
