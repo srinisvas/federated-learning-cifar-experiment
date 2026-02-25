@@ -85,7 +85,7 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         # Flower may still call Strategy.evaluate (implemented in base classes).
         self._evaluate_fn_fallback = kwargs.get("evaluate_fn", None)
         self._initial_parameters_fallback = kwargs.get("initial_parameters", None)
-        self.attack_selection_mode = kwargs.get("attack_selection_mode", "random").lower()
+        self.attacker_selection_mode = kwargs.get("attacker_selection_mode", "random").lower()
         # Track previous global model (g_{t-1}) to send to clients
         self.prev_global_parameters: Optional[Parameters] = None
         self.last_krum_selected_cid: Optional[str] = None
@@ -136,7 +136,7 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
 
         all_clients = list(client_manager.all().values())
 
-        if self.attack_selection_mode == "persistent":
+        if self.attacker_selection_mode == "persistent":
             # ---- Fixed attacker pool ----
             try:
                 cfg0 = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
@@ -192,7 +192,7 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                 }
             )
 
-            if self.attack_selection_mode == "persistent":
+            if self.attacker_selection_mode == "persistent":
                 config["krum_selected_cid"] = self.last_krum_selected_cid
                 config["krum_ref_delta"] = (
                     json.dumps(self.last_krum_selected_delta.tolist())

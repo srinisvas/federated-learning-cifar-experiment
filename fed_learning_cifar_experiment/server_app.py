@@ -133,7 +133,7 @@ def server_fn(context: Context):
             backdoor_attack_mode=backdoor_attack_mode,
             num_of_malicious_clients=num_of_malicious_clients,
             num_of_malicious_clients_per_round=num_of_malicious_clients_per_round,
-            attack_selection_mode = attack_selection_mode,
+            attacker_selection_mode = attacker_selection_mode,
             num_byzantine=int(num_of_malicious_clients_per_round),  # or num_of_malicious_clients_per_round
         )
 
