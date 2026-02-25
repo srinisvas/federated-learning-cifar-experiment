@@ -50,7 +50,7 @@ class FlowerClient(NumPyClient):
                 json.loads(config["krum_ref_delta"]),
                 dtype=torch.float32,
             )
-        benign_epochs = 5
+        benign_epochs = self.local_epochs
         attack_epochs = self.local_epochs
         set_weights(self.net, parameters)
         init_state = {k: v.cpu().clone() for k, v in self.net.state_dict().items()}
@@ -219,7 +219,7 @@ class FlowerClient(NumPyClient):
                     training_data=clean_training_set,
                     device=self.device,
                     init_vec=init_vec.cpu(),
-                    epochs=1,
+                    epochs=benign_epochs,
                     lr=0.005,
                     num_refs=16,
                     seed_base=shared_seed,
