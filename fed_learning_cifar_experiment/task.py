@@ -119,7 +119,7 @@ def train_constrain_and_scale_krum_proxy(
 
     # Backdoor strength is controlled by your data loader (collate_with_backdoor)
     # Camouflage weights
-    lambda_nearest_ref: float = 0.3,
+    lambda_nearest_ref: float = 0.1,
     lambda_match_clean: float = 0.0,        # ||delta_adv - delta_clean||^2
     lambda_dir: float = 0.05,                # align direction with delta_clean
     lambda_norm_match: float = 0.5,         # match ||delta_adv|| to ||delta_clean||
@@ -254,21 +254,24 @@ def train_constrain_and_scale_krum_proxy(
             nearest_ref_loss = torch.min(dists)
 
             # (E) prevent collapse to zero
-            """
+
             min_norm = (min_norm_frac * clean_norm).detach()
             collapse_penalty = F.relu(min_norm - adv_norm) ** 2
-            """
 
-            ce_weight = 1.0 if epoch < 2 else 0.5
+
+            ce_weight = 1.0 if epoch < epochs // 2 else 0.5
+
+            camouflage_scale = min(1.0, epoch / max(1, epochs // 3))
 
             loss = (
                     ce_weight * ce
                     + lambda_dir * dir_loss
                     + lambda_norm_match * norm_match
-                    + lambda_centroid * centroid_loss
-                    + lambda_krum_proxy * knn_loss
+                    + camouflage_scale * lambda_centroid * centroid_loss
+                    + camouflage_scale * lambda_krum_proxy * knn_loss
                     + lambda_match_clean * match_clean
-                    + lambda_nearest_ref * nearest_ref_loss
+                    + camouflage_scale * lambda_nearest_ref * nearest_ref_loss
+                    + 0.5 * collapse_penalty
             )
 
             loss.backward()
