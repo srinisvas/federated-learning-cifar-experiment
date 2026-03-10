@@ -123,12 +123,12 @@ def train_constrain_and_scale_krum_proxy(
     lambda_match_clean: float = 0.0,        # ||delta_adv - delta_clean||^2
     lambda_dir: float = 0.2,                # align direction with delta_clean
     lambda_norm_match: float = 0.5,         # match ||delta_adv|| to ||delta_clean||
-    lambda_krum_proxy: float = 0.5, # Krum score proxy weight
-    lambda_centroid: float = 1.5,
+    lambda_krum_proxy: float = 1.0, # Krum score proxy weight
+    lambda_centroid: float = 0.5,
     malicious_centroid: torch.Tensor = None,
     lambda_centroid_self: float = 0.3,
     # Krum proxy config
-    krum_k: int = 7,                        # sum distances to K nearest reference deltas
+    krum_k: int = 5,                        # sum distances to K nearest reference deltas
     ref_scale: float = 1.0,                 # scale references (usually 1.0)
     eps: float = 1e-12,
 
@@ -281,8 +281,8 @@ def train_constrain_and_scale_krum_proxy(
                 target_norm = ref_norms.median().detach()
 
                 # allow small slack
-                lo = 0.95 * target_norm
-                hi = 1.05 * target_norm
+                lo = 0.98 * target_norm
+                hi = 1.02 * target_norm
 
                 if adv_norm < lo:
                     delta_adv.mul_(lo / adv_norm)
