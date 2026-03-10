@@ -245,7 +245,7 @@ class FlowerClient(NumPyClient):
                     lambda_norm_match=0.2,
                     lambda_krum_proxy=1.0,
 
-                    krum_k=5,  # if n=10 and f=1 => n-f-2=7, but proxy 3-5 is ok
+                    krum_k=7,  # if n=10 and f=1 => n-f-2=7, but proxy 3-5 is ok
                     min_norm_frac=0.10,
                 )
 
