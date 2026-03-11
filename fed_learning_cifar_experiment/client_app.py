@@ -39,6 +39,11 @@ class FlowerClient(NumPyClient):
                 "alpha": 0.9,
             })
 
+        if "ref_memory" not in self.client_state.config_records:
+            self.client_state.config_records["ref_memory"] = ConfigRecord({
+                "refs": []
+            })
+
     def get_properties(self, config):
         return {"partition_id": str(self.context.node_config["partition-id"])}
 
@@ -218,17 +223,37 @@ class FlowerClient(NumPyClient):
 
                 shared_seed = int(config.get("current-round", 0)) * 1000
 
-                ref_deltas = build_reference_clean_deltas(
+                new_refs  = build_reference_clean_deltas(
                     net=net_ref,  # base architecture (untrained clone is fine)
                     training_data=clean_training_set,
                     device=self.device,
                     init_vec=init_vec.cpu(),
                     epochs=benign_epochs,
                     lr=0.005,
-                    num_refs=24,
+                    num_refs=12,
                     seed_base=shared_seed,
                     label_smoothing=0.05,
                 )
+
+                ref_state = self.client_state.config_records["ref_memory"]
+                old_refs = ref_state.get("refs", [])
+
+                refs_combined = []
+
+                if old_refs:
+                    for r in old_refs:
+                        refs_combined.append(torch.tensor(r))
+
+                refs_combined.extend(new_refs)
+
+                # keep most recent 32
+                refs_combined = refs_combined[-32:]
+
+                self.client_state.config_records["ref_memory"] = ConfigRecord({
+                    "refs": [r.tolist() for r in refs_combined]
+                })
+
+                ref_deltas = refs_combined
 
                 # 3) Run constrained backdoor training using the BACKDOOR loader
                 final_vec = train_constrain_and_scale_krum_proxy(
