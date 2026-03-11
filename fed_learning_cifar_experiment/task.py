@@ -99,6 +99,93 @@ def build_reference_clean_deltas(
 
     return refs
 
+def train_hybrid_krum_attack(
+    net,
+    training_data_clean,
+    training_data_backdoor,
+    device,
+    init_vec,
+    epochs_clean=1,
+    epochs_backdoor=2,
+    proxy_epochs=2,
+    alpha=0.8,
+):
+    """
+    Hybrid attack combining:
+    clean train + backdoor train + blend + proxy optimization
+    """
+
+    clean_net = _clone_net(net)
+
+    _, clean_vec = train(
+        clean_net,
+        training_data_clean,
+        epochs=epochs_clean,
+        device=device,
+        lr=0.05,
+    )
+
+    clean_delta = clean_vec - init_vec
+
+    bd_net = _clone_net(net)
+
+    _, backdoor_vec = train_backdoor(
+        bd_net,
+        training_data_backdoor,
+        epochs=epochs_backdoor,
+        device=device,
+        lr=0.01,
+    )
+
+    ref_clean_deltas = build_reference_clean_deltas(
+        net=_clone_net(net),
+        training_data=training_data_clean,
+        device=device,
+        init_vec=init_vec,
+        epochs=1,
+        num_refs=8,
+    )
+
+    anchor_vec = krum_blended_attack(
+        init_vec=init_vec,
+        clean_vec=clean_vec,
+        backdoor_vec=backdoor_vec,
+        ref_deltas=ref_clean_deltas,
+        alpha=alpha,
+    )
+
+    proxy_net = _clone_net(net)
+
+    vector_to_parameters(
+        anchor_vec.to(device),
+        proxy_net.parameters(),
+    )
+
+    proxy_vec = train_constrain_and_scale_krum_proxy_v2(
+        net=proxy_net,
+        training_data=training_data_backdoor,
+        device=device,
+        init_vec=init_vec,
+        clean_delta=clean_delta,
+        ref_clean_deltas=ref_clean_deltas,
+        epochs=proxy_epochs,
+        lr=0.005,
+    )
+
+    delta = proxy_vec - init_vec
+
+    ref_norms = torch.stack([torch.norm(d) for d in ref_clean_deltas])
+    target_norm = ref_norms.median()
+
+    adv_norm = torch.norm(delta)
+
+    if adv_norm > 1e-8:
+        delta = delta * (target_norm / adv_norm)
+
+    final_vec = init_vec + delta
+
+    return final_vec.detach().cpu().clone()
+
 def krum_blended_attack(
     init_vec,
     clean_vec,
@@ -128,6 +215,195 @@ def krum_score_proxy(delta, ref_deltas, k):
     diffs = ref_deltas - delta.unsqueeze(0)
     dists = torch.sum(diffs * diffs, dim=1)
     return torch.topk(dists, k=min(k, len(dists)), largest=False).values.mean()
+
+def train_constrain_and_scale_krum_proxy_v2(
+    net,
+    training_data,
+    device,
+    init_vec: torch.Tensor,
+    clean_delta: torch.Tensor,
+    ref_clean_deltas=None,
+    epochs: int = 2,
+    lr: float = 0.01,
+    label_smoothing: float = 0.0,
+    weight_decay: float = 0.0,
+
+    lambda_match_clean: float = 0.05,
+    lambda_dir: float = 0.02,
+    lambda_norm_match: float = 0.15,
+    lambda_krum_proxy: float = 0.8,
+    lambda_centroid: float = 0.10,
+    lambda_nearest_ref: float = 0.0,
+
+    malicious_centroid: torch.Tensor = None,
+    lambda_centroid_self: float = 0.05,
+
+    krum_k: int = 5,
+    ref_scale: float = 1.0,
+    eps: float = 1e-12,
+
+    min_norm_frac: float = 0.25,
+    krum_margin: float = 0.0,
+    warmup_frac: float = 0.4,
+):
+    """
+    Improved Krum-proxy attacker:
+    - lets CE/backdoor form first
+    - penalizes attacker only when its Krum-style score is worse than benign references
+    - clamps norm to benign-like range after each step
+    """
+
+    net = net.to(device)
+    net.train()
+
+    g = init_vec.detach().to(device)
+    vector_to_parameters(g, net.parameters())
+
+    init_vec_cpu = init_vec.detach().cpu()
+    clean_delta_cpu = clean_delta.detach().cpu()
+
+    if ref_clean_deltas is None:
+        clean_ref_net = tiny_resnet18(num_classes=10, base_width=8)
+        ref_clean_deltas = build_reference_clean_deltas(
+            net=clean_ref_net,
+            training_data=training_data,
+            device=device,
+            init_vec=init_vec_cpu,
+            epochs=1,
+            lr=max(lr, 0.005),
+            num_refs=max(krum_k + 3, 8),
+            label_smoothing=0.05,
+        )
+
+    refs = torch.stack([d.detach().cpu() * ref_scale for d in ref_clean_deltas], dim=0).to(device)  # [M, D]
+
+    clean_delta_dev = clean_delta_cpu.to(device)
+    clean_norm = torch.norm(clean_delta_dev) + eps
+    clean_unit = clean_delta_dev / clean_norm if clean_norm > 1e-8 else clean_delta_dev
+
+    ref_norms = torch.norm(refs, dim=1)
+    target_norm = ref_norms.median().detach()
+    ref_mean = refs.median(dim=0).values
+
+    if malicious_centroid is not None:
+        mal_cent = malicious_centroid.detach().to(device)
+        ref_mean = 0.8 * ref_mean + 0.2 * mal_cent
+    else:
+        mal_cent = None
+
+    def krum_style_score(delta: torch.Tensor, ref_bank: torch.Tensor, k: int):
+        diff = ref_bank - delta.unsqueeze(0)          # [M, D]
+        dists = torch.sum(diff * diff, dim=1)         # [M]
+        kk = min(k, dists.numel())
+        vals, _ = torch.topk(dists, k=kk, largest=False)
+        return vals.mean()
+
+    with torch.no_grad():
+        benign_scores = []
+        for i in range(refs.size(0)):
+            others = torch.cat([refs[:i], refs[i + 1:]], dim=0)
+            if others.size(0) == 0:
+                benign_scores.append(torch.zeros((), device=device))
+            else:
+                benign_scores.append(krum_style_score(refs[i], others, krum_k))
+        benign_scores = torch.stack(benign_scores)
+        benign_target_score = benign_scores.median().detach()
+
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
+
+    total_steps = max(1, epochs * len(training_data))
+    warmup_steps = max(1, int(total_steps * warmup_frac))
+    step_idx = 0
+
+    for epoch in range(epochs):
+        for batch in training_data:
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            logits = net(images)
+            ce = criterion(logits, labels)
+
+            w = parameters_to_vector(net.parameters())
+            delta_adv = w - g
+            adv_norm = torch.norm(delta_adv) + eps
+
+            if adv_norm > 1e-8 and clean_norm > 1e-8:
+                adv_unit = delta_adv / adv_norm
+                cos = torch.dot(adv_unit, clean_unit).clamp(-1.0, 1.0)
+                dir_loss = 1.0 - cos
+            else:
+                dir_loss = torch.zeros((), device=device)
+
+            match_clean = torch.mean((delta_adv - clean_delta_dev) ** 2)
+
+            norm_match = ((adv_norm - target_norm) / (target_norm + eps)) ** 2
+
+            centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
+            if mal_cent is not None:
+                centroid_loss = centroid_loss + lambda_centroid_self * torch.mean((delta_adv - mal_cent) ** 2)
+
+            dists_to_refs = torch.sum((refs - delta_adv.unsqueeze(0)) ** 2, dim=1)
+            nearest_ref_loss = torch.min(dists_to_refs)
+
+            score_adv = krum_style_score(delta_adv, refs, krum_k)
+
+            # Only penalize attacker when it is worse than typical benign score
+            krum_proxy_loss = torch.relu(score_adv - (benign_target_score + krum_margin))
+
+            # Prevent tiny-update collapse
+            min_norm = (min_norm_frac * target_norm).detach()
+            collapse_penalty = torch.relu(min_norm - adv_norm) ** 2
+
+            # Warmup: let backdoor CE dominate early
+            if step_idx < warmup_steps:
+                camo_scale = 0.0
+                ce_weight = 1.0
+            else:
+                camo_scale = min(1.0, (step_idx - warmup_steps) / max(1, total_steps - warmup_steps))
+                ce_weight = 1.0
+
+            loss = (
+                ce_weight * ce
+                + camo_scale * (
+                    lambda_dir * dir_loss
+                    + lambda_norm_match * norm_match
+                    + lambda_centroid * centroid_loss
+                    + lambda_krum_proxy * krum_proxy_loss
+                    + lambda_match_clean * match_clean
+                    + lambda_nearest_ref * nearest_ref_loss
+                    + 0.25 * collapse_penalty
+                )
+            )
+
+            loss.backward()
+            optimizer.step()
+
+            with torch.no_grad():
+                w_post = parameters_to_vector(net.parameters())
+                delta_post = w_post - g
+                norm_post = torch.norm(delta_post) + eps
+
+                lo = 0.85 * target_norm
+                hi = 1.15 * target_norm
+
+                if norm_post < lo:
+                    delta_post = delta_post * (lo / norm_post)
+                    vector_to_parameters(g + delta_post, net.parameters())
+                elif norm_post > hi:
+                    delta_post = delta_post * (hi / norm_post)
+                    vector_to_parameters(g + delta_post, net.parameters())
+
+            step_idx += 1
+
+    return parameters_to_vector(net.parameters()).detach().cpu().clone()
 
 def train_constrain_and_scale_krum_proxy(
     net,

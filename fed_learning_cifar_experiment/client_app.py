@@ -11,7 +11,8 @@ from flwr.common import Parameters, parameters_to_ndarrays
 from fed_learning_cifar_experiment.task import (
     get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
     get_basic_cnn_model, train_backdoor, krum_safe_scale,
-    train_constrain_and_scale_krum_proxy, build_reference_clean_deltas, krum_blended_attack
+    train_constrain_and_scale_krum_proxy, build_reference_clean_deltas, krum_blended_attack,
+    train_constrain_and_scale_krum_proxy_v2, train_hybrid_krum_attack
 )
 from fed_learning_cifar_experiment.utils.evaluate_attack import evaluate_asr
 
@@ -179,7 +180,7 @@ class FlowerClient(NumPyClient):
                 self.prev_global_vec = init_vec.clone()
                 return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
 
-            elif attack_type == "constrain-and-scale-krum-proxy":
+            elif attack_type == "constrain-and-scale-krum-blended":
 
                 net_clean = get_resnet_cnn_model()
                 shared_seed = int(config.get("current-round", 0)) * 1000
@@ -258,6 +259,49 @@ class FlowerClient(NumPyClient):
 
                 return get_weights(self.net), len(backdoor_training_set.dataset), {
                     "attack": "constrain-and-scale-krum-proxy-2"
+                }
+
+            elif attack_type == "constrain-and-scale-krum-proxy":
+
+                clean_training_set, _ = load_data(
+                    partition_id,
+                    num_partitions,
+                    alpha_val=0.9,
+                    backdoor_enabled=False
+                )
+
+                backdoor_training_set, _ = load_data(
+                    partition_id,
+                    num_partitions,
+                    alpha_val=0.9,
+                    backdoor_enabled=True
+                )
+
+                final_vec = train_hybrid_krum_attack(
+                    net=self.net,
+                    training_data_clean=clean_training_set,
+                    training_data_backdoor=backdoor_training_set,
+                    device=self.device,
+                    init_vec=init_vec.cpu(),
+                    epochs_clean=1,
+                    epochs_backdoor=3,
+                    proxy_epochs=2,
+                    alpha=0.6
+                )
+
+                vector_to_parameters(final_vec.to(self.device), self.net.parameters())
+
+                self.prev_global_vec = init_vec.clone()
+
+                delta_adv = final_vec - init_vec.cpu()
+
+                print(
+                    f"[Client {partition_id}][Round {current_round}] "
+                    f"HYBRID ATTACK ||Δ_adv||={delta_adv.norm().item():.4f}"
+                )
+
+                return get_weights(self.net), len(backdoor_training_set.dataset), {
+                    "attack": "hybrid-krum"
                 }
 
             else:
@@ -362,6 +406,30 @@ class FlowerClient(NumPyClient):
                     min_norm_frac=0.10,
                 )
 
+                final_vec = train_constrain_and_scale_krum_proxy_v2(
+                    net=self.net,
+                    training_data=backdoor_training_set,
+                    device=self.device,
+                    init_vec=init_vec.cpu(),
+                    clean_delta=clean_delta,
+                    ref_clean_deltas=ref_deltas,
+                    malicious_centroid=malicious_centroid,
+                    epochs=attack_epochs,
+                    lr=0.005,
+                    label_smoothing=0.0,
+                    weight_decay=0.0,
+                    lambda_match_clean=0.05,
+                    lambda_dir=0.02,
+                    lambda_norm_match=0.15,
+                    lambda_krum_proxy=0.8,
+                    lambda_centroid=0.10,
+                    lambda_nearest_ref=0.0,
+                    krum_k=5,
+                    min_norm_frac=0.25,
+                    krum_margin=0.0,
+                    warmup_frac=0.4,
+                )
+
                 # 4) Krum-safe scaling: keep gamma SMALL
                 # Base it on clean_delta norm, NOT prev_global step.
                 attack_step = torch.norm(final_vec - init_vec.cpu()).item()
@@ -397,7 +465,7 @@ class FlowerClient(NumPyClient):
                 self.prev_global_vec = init_vec.clone()
 
                 delta_adv = final_vec - init_vec.cpu()
-                ref_mean = torch.stack(ref_deltas).mean(dim=0)
+                ref_mean = torch.stack(ref_deltas).median(dim=0).values
 
                 # --- Update malicious centroid ---
                 delta_adv = (final_vec - init_vec.cpu()).detach().cpu()
