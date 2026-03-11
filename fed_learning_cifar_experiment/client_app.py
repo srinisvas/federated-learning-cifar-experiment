@@ -12,7 +12,7 @@ from fed_learning_cifar_experiment.task import (
     get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
     get_basic_cnn_model, train_backdoor, krum_safe_scale,
     train_constrain_and_scale_krum_proxy, build_reference_clean_deltas, krum_blended_attack,
-    train_constrain_and_scale_krum_proxy_v2, train_hybrid_krum_attack
+    train_constrain_and_scale_krum_proxy_v2, train_hybrid_krum_attack, train_anchored_krum_attack
 )
 from fed_learning_cifar_experiment.utils.evaluate_attack import evaluate_asr
 
@@ -259,6 +259,48 @@ class FlowerClient(NumPyClient):
 
                 return get_weights(self.net), len(backdoor_training_set.dataset), {
                     "attack": "constrain-and-scale-krum-proxy-2"
+                }
+
+            elif attack_type == "anchored-krum":
+
+                clean_training_set, _ = load_data(
+                    partition_id,
+                    num_partitions,
+                    alpha_val=0.9,
+                    backdoor_enabled=False
+                )
+
+                backdoor_training_set, _ = load_data(
+                    partition_id,
+                    num_partitions,
+                    alpha_val=0.9,
+                    backdoor_enabled=True
+                )
+
+                final_vec = train_anchored_krum_attack(
+                    net=self.net,
+                    training_data_clean=clean_training_set,
+                    training_data_backdoor=backdoor_training_set,
+                    device=self.device,
+                    init_vec=init_vec.cpu(),
+                    epochs_clean=2,
+                    epochs_backdoor=3,
+                    distance_penalty=0.15
+                )
+
+                vector_to_parameters(final_vec.to(self.device), self.net.parameters())
+
+                self.prev_global_vec = init_vec.clone()
+
+                delta_adv = final_vec - init_vec.cpu()
+
+                print(
+                    f"[Client {partition_id}][Round {current_round}] "
+                    f"ANCHORED ATTACK ||Δ_adv||={delta_adv.norm().item():.4f}"
+                )
+
+                return get_weights(self.net), len(backdoor_training_set.dataset), {
+                    "attack": "anchored-krum"
                 }
 
             elif attack_type == "constrain-and-scale-krum-proxy":

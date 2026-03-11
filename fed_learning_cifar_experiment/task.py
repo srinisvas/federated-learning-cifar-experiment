@@ -186,6 +186,96 @@ def train_hybrid_krum_attack(
 
     return final_vec.detach().cpu().clone()
 
+
+def train_anchored_krum_attack(
+        net,
+        training_data_clean,
+        training_data_backdoor,
+        device,
+        init_vec,
+        epochs_clean=2,
+        epochs_backdoor=3,
+        distance_penalty=0.15,  # Controls how tightly we anchor to the clean manifold
+):
+    """
+    Highly efficient Krum-bypass attack.
+    Step 1: Find the clean manifold.
+    Step 2: Inject the trigger without leaving the clean manifold.
+    Step 3: Project to the exact benign median norm.
+    """
+
+    clean_net = _clone_net(net)
+
+    # Train purely on clean data to find the legitimate update direction
+    _, clean_vec = train(
+        clean_net,
+        training_data_clean,
+        epochs=epochs_clean,
+        device=device,
+        lr=0.05,
+    )
+
+    bd_net = _clone_net(net)
+
+    # CRITICAL: Initialize the backdoor model WITH the clean weights, not init_vec
+    vector_to_parameters(clean_vec.to(device), bd_net.parameters())
+
+    criterion = torch.nn.CrossEntropyLoss().to(device)
+    # Use a lower learning rate to carefully carve the trigger into the clean weights
+    optimizer = torch.optim.SGD(bd_net.parameters(), lr=0.005, momentum=0.9)
+
+    bd_net.train()
+    clean_vec_dev = clean_vec.to(device).detach()
+
+    for epoch in range(epochs_backdoor):
+        for batch in training_data_backdoor:
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+            outputs = bd_net(images)
+
+            # Standard backdoor loss
+            loss_ce = criterion(outputs, labels)
+
+            # The singular constraint: penalize distance from the clean anchor
+            current_vec = parameters_to_vector(bd_net.parameters())
+            loss_dist = torch.sum((current_vec - clean_vec_dev) ** 2)
+
+            # Combine losses
+            loss = loss_ce + (distance_penalty * loss_dist)
+            loss.backward()
+            optimizer.step()
+
+    final_bd_vec = parameters_to_vector(bd_net.parameters()).detach().cpu()
+    adv_delta = final_bd_vec - init_vec
+
+    ref_clean_deltas = build_reference_clean_deltas(
+        net=_clone_net(net),
+        training_data=training_data_clean,
+        device=device,
+        init_vec=init_vec,
+        epochs=1,
+        num_refs=3,
+    )
+
+    ref_norms = torch.stack([torch.norm(d) for d in ref_clean_deltas])
+    target_norm = ref_norms.median()
+    adv_norm = torch.norm(adv_delta)
+
+    # Force the malicious delta to exactly match the benign median norm
+    if adv_norm > 1e-8:
+        adv_delta = adv_delta * (target_norm / adv_norm)
+
+    final_vec = init_vec + adv_delta
+
+    return final_vec.clone()
+
 def krum_blended_attack(
     init_vec,
     clean_vec,
