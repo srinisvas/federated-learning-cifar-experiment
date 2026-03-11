@@ -240,7 +240,7 @@ def train_anchored_krum_attack(
     )
     clean_vec_cpu = clean_vec.detach().cpu()
     clean_vec_dev = clean_vec_cpu.to(device)
-    clean_delta = (clean_vec_dev - init_vec_dev).detach()
+    clean_delta = (clean_vec_dev - init_vec_dev).detach().clone()
 
     # Step 2: benign-like references
     ref_clean_deltas = build_reference_clean_deltas(
@@ -295,7 +295,7 @@ def train_anchored_krum_attack(
             clean_unit = clean_delta / clean_norm
 
             loss_cos = 1.0 - torch.dot(delta_unit, clean_unit).clamp(-1.0, 1.0)
-            loss_clean_l2 = torch.mean((delta - clean_delta) ** 2)
+            loss_clean_l2 = torch.mean((delta - clean_delta) ** 2) / (torch.norm(clean_delta) + 1e-8)
             loss_ref_l2 = torch.mean((delta - ref_anchor) ** 2)
 
             loss_anchor = (
@@ -311,6 +311,9 @@ def train_anchored_krum_attack(
     # Step 5: final malicious update in global frame
     final_bd_vec = parameters_to_vector(bd_net.parameters()).detach().cpu()
     adv_delta = final_bd_vec - init_vec_cpu
+
+    if torch.norm(adv_delta) < 1e-6:
+        adv_delta = clean_delta.detach().cpu()
 
     # Step 6: norm match to benign-like scale
     ref_norms = torch.stack([torch.norm(d) for d in ref_clean_deltas])
