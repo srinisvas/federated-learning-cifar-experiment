@@ -41,7 +41,7 @@ class FlowerClient(NumPyClient):
 
         if "ref_memory" not in self.client_state.config_records:
             self.client_state.config_records["ref_memory"] = ConfigRecord({
-                "refs": []
+                "refs_json": []
             })
 
     def get_properties(self, config):
@@ -236,24 +236,27 @@ class FlowerClient(NumPyClient):
                 )
 
                 ref_state = self.client_state.config_records["ref_memory"]
-                old_refs = ref_state.get("refs", [])
+
+                ref_state = self.client_state.config_records["ref_memory"]
+                old_refs_json = ref_state.get("refs_json", [])
 
                 refs_combined = []
 
-                if old_refs:
-                    for r in old_refs:
-                        refs_combined.append(torch.tensor(r))
+                if old_refs_json:
+                    for s in old_refs_json:
+                        refs_combined.append(torch.tensor(json.loads(s), dtype=torch.float32))
 
-                refs_combined.extend(new_refs)
+                refs_combined.extend([r.detach().cpu() for r in new_refs])
 
                 # keep most recent 32
                 refs_combined = refs_combined[-32:]
 
                 self.client_state.config_records["ref_memory"] = ConfigRecord({
-                    "refs": [r.tolist() for r in refs_combined]
+                    "refs_json": [json.dumps(r.tolist()) for r in refs_combined]
                 })
 
                 ref_deltas = refs_combined
+
 
                 # 3) Run constrained backdoor training using the BACKDOOR loader
                 final_vec = train_constrain_and_scale_krum_proxy(
