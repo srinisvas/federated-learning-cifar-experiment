@@ -296,10 +296,14 @@ class FlowerClient(NumPyClient):
                 # normalize direction
                 delta_dir = delta_adv / (torch.norm(delta_adv) + 1e-12)
 
-                # match benign magnitude
-                ref_norms = torch.norm(ref_deltas, dim=1)
+                # convert refs list -> tensor
+                refs_tensor = torch.stack(ref_deltas)
+
+                # compute benign update magnitude
+                ref_norms = torch.norm(refs_tensor, dim=1)
                 target_norm = ref_norms.median()
 
+                # enforce deterministic malicious update
                 delta_adv = delta_dir * target_norm
 
                 # reconstruct malicious weights
