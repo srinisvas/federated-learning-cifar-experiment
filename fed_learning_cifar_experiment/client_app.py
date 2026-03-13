@@ -279,6 +279,8 @@ class FlowerClient(NumPyClient):
                     keep_delta_norm=False,
                 )
                 """
+
+                """
                 vector_to_parameters(final_vec.to(self.device), self.net.parameters())
                 self.prev_global_vec = init_vec.clone()
 
@@ -287,6 +289,32 @@ class FlowerClient(NumPyClient):
                     "clean_step": clean_step,
                     "attack_step": attack_step,
                 }
+                """
+
+                delta_adv = final_vec - init_vec.cpu()
+
+                # normalize direction
+                delta_dir = delta_adv / (torch.norm(delta_adv) + 1e-12)
+
+                # match benign magnitude
+                ref_norms = torch.norm(ref_deltas, dim=1)
+                target_norm = ref_norms.median()
+
+                delta_adv = delta_dir * target_norm
+
+                # reconstruct malicious weights
+                final_vec = init_vec.cpu() + delta_adv
+
+                vector_to_parameters(final_vec.to(self.device), self.net.parameters())
+
+                self.prev_global_vec = init_vec.clone()
+
+                return get_weights(self.net), len(backdoor_training_set.dataset), {
+                    "attack": "constrain-and-scale-krum-proxy",
+                    "clean_step": clean_step,
+                    "attack_step": attack_step,
+                }
+
 
         else:
             train_loss, final_vec = train(
