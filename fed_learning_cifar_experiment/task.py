@@ -126,7 +126,7 @@ def train_constrain_and_scale_krum_proxy(
     lambda_krum_proxy: float = 0.5, # Krum score proxy weight
     lambda_centroid: float = 5,
     malicious_centroid: torch.Tensor = None,
-    lambda_centroid_self: float = 6.0,
+    lambda_centroid_self: float = 10.0,
     # Krum proxy config
     krum_k: int = 7,                        # sum distances to K nearest reference deltas
     ref_scale: float = 1.0,                 # scale references (usually 1.0)
