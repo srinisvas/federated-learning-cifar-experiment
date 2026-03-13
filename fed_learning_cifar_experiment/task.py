@@ -124,7 +124,7 @@ def train_constrain_and_scale_krum_proxy(
     lambda_dir: float = 0.2,                # align direction with delta_clean
     lambda_norm_match: float = 0.5,         # match ||delta_adv|| to ||delta_clean||
     lambda_krum_proxy: float = 0.5, # Krum score proxy weight
-    lambda_centroid: float = 5,
+    lambda_centroid: float = 8,
     malicious_centroid: torch.Tensor = None,
     lambda_centroid_self: float = 10.0,
     # Krum proxy config
