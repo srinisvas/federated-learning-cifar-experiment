@@ -228,7 +228,7 @@ def train_constrain_and_scale_krum_proxy(
             # (D) Krum-score proxy: sum of distances to K nearest refs
 
             # (D1) centroid of benign-like references
-            ref_mean = refs.mean(dim=0)
+            ref_mean = refs.median(dim=0).values
 
             #centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
 
