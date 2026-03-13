@@ -124,7 +124,7 @@ def train_constrain_and_scale_krum_proxy(
     lambda_dir: float = 0.2,                # align direction with delta_clean
     lambda_norm_match: float = 0.5,         # match ||delta_adv|| to ||delta_clean||
     lambda_krum_proxy: float = 0.5, # Krum score proxy weight
-    lambda_centroid: float = 8,
+    lambda_centroid: float = 5,
     malicious_centroid: torch.Tensor = None,
     lambda_centroid_self: float = 10.0,
     # Krum proxy config
@@ -228,7 +228,7 @@ def train_constrain_and_scale_krum_proxy(
             # (D) Krum-score proxy: sum of distances to K nearest refs
 
             # (D1) centroid of benign-like references
-            ref_mean = refs.median(dim=0).values
+            ref_mean = refs.mean(dim=0)
 
             #centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
 
