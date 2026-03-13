@@ -126,7 +126,7 @@ def train_constrain_and_scale_krum_proxy(
     lambda_krum_proxy: float = 0.5, # Krum score proxy weight
     lambda_centroid: float = 5,
     malicious_centroid: torch.Tensor = None,
-    lambda_centroid_self: float = 1.5,
+    lambda_centroid_self: float = 2.0,
     # Krum proxy config
     krum_k: int = 7,                        # sum distances to K nearest reference deltas
     ref_scale: float = 1.0,                 # scale references (usually 1.0)
@@ -271,7 +271,7 @@ def train_constrain_and_scale_krum_proxy(
             collapse_penalty = F.relu(min_norm - adv_norm) ** 2
             """
 
-            ce_weight = 1.0 if epoch < 1 else 0.1
+            ce_weight = 1.0 if epoch < 1 else 0.02
 
             loss = (
                     ce_weight * ce
