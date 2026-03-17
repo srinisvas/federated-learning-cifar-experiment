@@ -108,213 +108,193 @@ def train_constrain_and_scale_krum_proxy(
     net,
     training_data,
     device,
-    init_vec: torch.Tensor,                 # global weights w_t as vector
-    clean_delta: torch.Tensor,              # delta_clean = w_clean - w_t (CPU or GPU ok)
-    ref_clean_deltas=None,                  # optional list[delta_ref] (CPU); if None, built internally'
-    krum_ref_delta: torch.Tensor = None,
+    init_vec,
+    clean_delta,
+    ref_clean_deltas=None,
+    krum_ref_delta=None,
+
     # Optim
-    epochs: int = 2,
-    lr: float = 0.01,
-    label_smoothing: float = 0.0,           # attacker usually 0
-    weight_decay: float = 0.0,
+    epochs=2,
+    lr=0.01,
+    label_smoothing=0.0,
+    weight_decay=0.0,
 
-    # Backdoor strength is controlled by your data loader (collate_with_backdoor)
-    # Camouflage weights
-    lambda_match_clean: float = 0.0,        # ||delta_adv - delta_clean||^2
-    lambda_dir: float = 0.2,                # align direction with delta_clean
-    lambda_norm_match: float = 0.5,         # match ||delta_adv|| to ||delta_clean||
-    lambda_krum_proxy: float = 0.5, # Krum score proxy weight
-    lambda_centroid: float = 0.05,
-    malicious_centroid: torch.Tensor = None,
-    lambda_centroid_self: float = 10.0,
-    lambda_orth_dev = 0.5,
-    # Krum proxy config
-    krum_k: int = 7,                        # sum distances to K nearest reference deltas
-    ref_scale: float = 1.0,                 # scale references (usually 1.0)
-    eps: float = 1e-12,
+    # Stealth weights (tuned for Single Krum)
+    lambda_norm_match=0.2,
+    lambda_krum_proxy=0.1,
+    lambda_centroid=0.0,          # keep VERY small or 0
 
-    # Optional: keep delta from collapsing
-    min_norm_frac: float = 0.10,            # enforce ||delta_adv|| >= frac * ||delta_clean||
+    krum_k=7,
+    ref_scale=1.0,
+    eps=1e-12,
 ):
     """
-    Bagdasaryan-style constrain-and-scale training with a Krum-score proxy loss.
+    Clean Single-Krum-optimized Constrain-and-Scale attack.
 
-    You must pass clean_delta computed from a clean local run:
-      clean_vec = train(clean_net, clean_data, ...)
-      clean_delta = clean_vec - init_vec
+    Design:
+    - Stage 1: learn strong backdoor
+    - Stage 2: apply minimal stealth (norm + Krum proxy)
+    - Final: one-shot projection
 
-    Krum proxy uses reference clean deltas (bootstrapped locally) and minimizes
-    sum of distances to the K nearest reference deltas:
-      proxy = sum_{j in KNN(refs)} ||delta_adv - delta_ref_j||^2
-
-    Returns: final_vec (weights) on CPU
+    Goal:
+    Preserve ASR while passing strict Single Krum selection.
     """
 
     net = net.to(device)
     net.train()
 
-    # Start from global weights
+    # Global weights
     g = init_vec.detach().to(device)
     vector_to_parameters(g, net.parameters())
 
     init_vec_cpu = init_vec.detach().cpu()
     clean_delta_cpu = clean_delta.detach().cpu()
 
-    # Build references if not provided
+    # ------------------------------------------------------------
+    # Build reference deltas
+    # ------------------------------------------------------------
     if ref_clean_deltas is None:
         clean_ref_net = tiny_resnet18(num_classes=10, base_width=8)
-        # Use small epochs for refs; keep consistent with benign client
+
         ref_clean_deltas = build_reference_clean_deltas(
-            net=clean_ref_net,          # clone a CPU copy, builder moves to device
+            net=clean_ref_net,
             training_data=training_data,
             device=device,
             init_vec=init_vec_cpu,
             epochs=1,
-            lr=max(lr, 0.005),                   # benign-like LR
+            lr=max(lr, 0.005),
             num_refs=max(krum_k + 1, 5),
             label_smoothing=0.05,
         )
 
-    # Stack refs as tensor on device for fast distance computation
-    refs = torch.stack([d * ref_scale for d in ref_clean_deltas], dim=0).to(device)  # [M, D]
+    refs = torch.stack([d * ref_scale for d in ref_clean_deltas], dim=0).to(device)
 
-    # Targets from clean delta
     clean_delta_dev = clean_delta_cpu.to(device)
     clean_norm = torch.norm(clean_delta_dev) + eps
-    clean_unit = clean_delta_dev / clean_norm
 
     criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
-    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=weight_decay)
 
-    for epoch in range(epochs):
+    # ============================================================
+    # STAGE 1 : STRONG BACKDOOR LEARNING
+    # ============================================================
+
+    optimizer = torch.optim.SGD(
+        net.parameters(),
+        lr=lr,
+        momentum=0.9,
+        weight_decay=weight_decay,
+    )
+
+    for epoch in range(max(1, epochs - 1)):
         for batch in training_data:
+
             if isinstance(batch, dict):
                 images, labels = batch["img"], batch["label"]
             else:
                 images, labels = batch
 
-            images = images.to(device, non_blocking=True)
-            labels = labels.to(device, non_blocking=True)
+            images = images.to(device)
+            labels = labels.to(device)
 
-            optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad()
+
             logits = net(images)
             ce = criterion(logits, labels)
 
-            w = parameters_to_vector(net.parameters())              # [D]
-            delta_adv = (w - g)                                     # [D]
+            ce.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
+
+            optimizer.step()
+
+    # ============================================================
+    # STAGE 2 : MINIMAL KRUM STEALTH
+    # ============================================================
+
+    optimizer = torch.optim.SGD(
+        net.parameters(),
+        lr=lr * 0.5,
+        momentum=0.9,
+        weight_decay=weight_decay,
+    )
+
+    for epoch in range(1):
+        for batch in training_data:
+
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+
+            images = images.to(device)
+            labels = labels.to(device)
+
+            optimizer.zero_grad()
+
+            logits = net(images)
+            ce = criterion(logits, labels)
+
+            w = parameters_to_vector(net.parameters())
+            delta_adv = w - g
+
             adv_norm = torch.norm(delta_adv) + eps
-            adv_unit = delta_adv / adv_norm
 
-            # (A) Bagdasaryan core: stay close to clean delta
-            match_clean = torch.mean((delta_adv - clean_delta_dev) ** 2)
+            # ------------------------------
+            # Norm match
+            # ------------------------------
+            norm_match = (adv_norm - clean_norm) ** 2
 
-            """
-            # (B) direction alignment with clean delta
-            if torch.isfinite(clean_norm) and clean_norm > 1e-6 and adv_norm > 1e-6:
-                cos = torch.dot(adv_unit, clean_unit).clamp(-1.0, 1.0)
-                dir_loss = (1.0 - cos)
-            else:
-                dir_loss = torch.zeros((), device=device)
-            """
-
-            # disable direction loss for strict Krum
-            dir_loss = torch.zeros((), device=device)
-
-            # (C) norm matching to clean update magnitude
-            if torch.isfinite(clean_norm):
-                norm_match = (adv_norm - clean_norm) ** 2
-            else:
-                norm_match = torch.zeros((), device=device)
-
-            # (D) Krum-score proxy: sum of distances to K nearest refs
-
-            # (D1) centroid of benign-like references
-            ref_mean = refs.median(dim=0).values
-
-            #centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
-
-            ref_dir = ref_mean / (torch.norm(ref_mean) + eps)
-            adv_dir = delta_adv / (torch.norm(delta_adv) + eps)
-
-            centroid_loss = torch.sum((adv_dir - ref_dir) ** 2)
-
-            if krum_ref_delta is not None:
-                krum_ref_delta = krum_ref_delta.to(device)
-                centroid_loss += lambda_centroid_self * torch.mean(
-                    (delta_adv - krum_ref_delta) ** 2
-                )
-
-            if (
-                    malicious_centroid is not None
-                    and krum_ref_delta is None
-            ):
-                centroid_loss += lambda_centroid_self * torch.mean(
-                    (delta_adv - malicious_centroid.to(device)) ** 2
-                )
-
-            # (D2) KNN distances to refs
-
-            refs_centered = refs - ref_mean
-            delta_centered = delta_adv - ref_mean
-
-            diff = refs_centered - delta_centered.unsqueeze(0)
+            # ------------------------------
+            # Krum proxy (CRITICAL: mean)
+            # ------------------------------
+            diff = refs - delta_adv.unsqueeze(0)
             dists = torch.sum(diff * diff, dim=1)
 
-            #diff = refs - delta_adv.unsqueeze(0)
-            #dists = torch.sum(diff * diff, dim=1)
             k = min(krum_k, dists.numel())
-            knn_vals, _ = torch.topk(dists, k=k, largest=False)
-            knn_loss = torch.sum(knn_vals)
+            knn_vals = torch.topk(dists, k=k, largest=False).values
 
-            # (E) prevent collapse to zero
-            """
-            min_norm = (min_norm_frac * clean_norm).detach()
-            collapse_penalty = F.relu(min_norm - adv_norm) ** 2
-            """
+            knn_loss = torch.mean(knn_vals)
 
-            ce_weight = 1.0 if epoch < 1 else 0.02
+            # ------------------------------
+            # Optional light centroid pull
+            # ------------------------------
+            if lambda_centroid > 0:
+                ref_mean = refs.median(dim=0).values
+                centroid_loss = torch.mean((delta_adv - ref_mean) ** 2)
+            else:
+                centroid_loss = torch.zeros((), device=device)
 
-            # (F) Orthogonal loss factor
-
-            centroid_dir = ref_mean / (torch.norm(ref_mean) + eps)
-
-            proj = torch.dot(delta_adv, centroid_dir) * centroid_dir
-            orthogonal_component = delta_adv - proj
-
-            orth_loss = torch.mean(orthogonal_component ** 2)
-
+            # ------------------------------
+            # Final loss (minimal)
+            # ------------------------------
             loss = (
-                    ce_weight * ce
-                    + lambda_dir * dir_loss
-                    + lambda_norm_match * norm_match
-                    + lambda_centroid * centroid_loss
-                    + lambda_krum_proxy * knn_loss
-                    + lambda_orth_dev * orth_loss
+                0.3 * ce
+                + lambda_norm_match * norm_match
+                + lambda_krum_proxy * knn_loss
+                + lambda_centroid * centroid_loss
             )
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
             optimizer.step()
 
-            with torch.no_grad():
-                w = parameters_to_vector(net.parameters())
-                delta_adv = w - g
-                adv_norm = torch.norm(delta_adv) + eps
+    # ============================================================
+    # FINAL PROJECTION (ONCE ONLY)
+    # ============================================================
 
-                # target norm from benign refs (more stable than clean_delta)
-                ref_norms = torch.norm(refs, dim=1)
-                target_norm = ref_norms.median().detach()
+    with torch.no_grad():
 
-                # allow small slack
-                lo = 0.995 * target_norm
-                hi = 1.005 * target_norm
+        w = parameters_to_vector(net.parameters())
+        delta_adv = w - g
 
-                if adv_norm < lo:
-                    delta_adv.mul_(lo / adv_norm)
-                    vector_to_parameters(g + delta_adv, net.parameters())
-                elif adv_norm > hi:
-                    delta_adv.mul_(hi / adv_norm)
-                    vector_to_parameters(g + delta_adv, net.parameters())
+        ref_norms = torch.norm(refs, dim=1)
+        target_norm = ref_norms.median()
+
+        adv_norm = torch.norm(delta_adv) + eps
+
+        scale = target_norm / adv_norm
+        delta_adv = delta_adv * scale
+
+        vector_to_parameters(g + delta_adv, net.parameters())
 
     return parameters_to_vector(net.parameters()).detach().cpu().clone()
 
