@@ -240,9 +240,9 @@ class FlowerClient(NumPyClient):
                     lr=0.005,
                     label_smoothing=0.0,
                     weight_decay=0.0,
-                    lambda_norm_match=0.15,
-                    lambda_krum_proxy=0.15,
-                    lambda_anchor=0.05,
+                    lambda_norm_match=0.10,
+                    lambda_krum_proxy=0.1,
+                    lambda_anchor=0.01,
                     lambda_centroid=0.0,
                     krum_k=7,
                 )
