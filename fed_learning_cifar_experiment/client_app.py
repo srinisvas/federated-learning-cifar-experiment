@@ -241,8 +241,8 @@ class FlowerClient(NumPyClient):
                     label_smoothing=0.0,
                     weight_decay=0.0,
                     lambda_norm_match=0.10,
-                    lambda_krum_proxy=0.1,
-                    lambda_anchor=0.01,
+                    lambda_krum_proxy=0.15,
+                    lambda_anchor=0.02,
                     lambda_centroid=0.0,
                     krum_k=7,
                 )
@@ -322,12 +322,22 @@ class FlowerClient(NumPyClient):
                 closest_idx = torch.argmin(dists)
                 anchor_ref = refs_tensor[closest_idx]
 
-                target_norm = 0.995 * torch.norm(anchor_ref).detach()
 
-                delta_adv = 0.85 * delta_adv + 0.15 * anchor_ref
+                #target_norm = 0.995 * torch.norm(anchor_ref).detach()
+                #delta_adv = 0.85 * delta_adv + 0.15 * anchor_ref
 
-                delta_dir = delta_adv / (torch.norm(delta_adv) + 1e-12)
-                delta_adv = delta_dir * target_norm
+                #delta_dir = delta_adv / (torch.norm(delta_adv) + 1e-12)
+                #delta_adv = delta_dir * target_norm
+
+                ref_norms = torch.norm(refs_tensor, dim=1)
+
+                # lower quantile (more Krum-like than median)
+                target_norm = torch.quantile(ref_norms, 0.3).detach()
+
+                adv_norm = torch.norm(delta_adv) + 1e-12
+                scale = target_norm / adv_norm
+
+                delta_adv = delta_adv * scale
 
                 # reconstruct malicious weights
                 final_vec = init_vec.cpu() + delta_adv
