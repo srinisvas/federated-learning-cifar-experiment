@@ -1,4 +1,5 @@
 import json
+import random
 from collections import OrderedDict
 
 import torch
@@ -345,12 +346,14 @@ class FlowerClient(NumPyClient):
                 }
 
         else:
+            sampled_lr = random.choice([0.003, 0.005, 0.007])
+            sampled_epochs = random.choice([3, 5, 7])
             train_loss, final_vec = train(
                 self.net,
                 self.training_set,
-                benign_epochs,
+                sampled_epochs,
                 self.device,
-                0.005
+                sampled_lr
             )
 
             self.prev_global_vec = init_vec.clone()
