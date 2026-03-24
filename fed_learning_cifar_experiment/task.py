@@ -181,7 +181,17 @@ def train_constrain_and_scale_krum_proxy(
     clean_delta_dev = clean_delta_cpu.to(device)
     clean_norm = torch.norm(clean_delta_dev) + eps
 
-    local_krum_anchor = _select_local_krum_anchor(refs, krum_k)
+    #local_krum_anchor = _select_local_krum_anchor(refs, krum_k)
+
+    diffs = refs.unsqueeze(1) - refs.unsqueeze(0)
+    pairwise = torch.sum(diffs * diffs, dim=2)
+
+    k_eff = min(krum_k, refs.shape[0] - 1)
+    knn = torch.topk(pairwise, k=k_eff, largest=False).values
+    scores = torch.mean(knn, dim=1)
+
+    top_ids = torch.topk(-scores, k=min(3, len(scores))).indices
+    local_krum_anchor = torch.mean(refs[top_ids], dim=0).detach()
 
     if prev_malicious_delta is not None:
         prev_malicious_delta = prev_malicious_delta.detach().to(device)
@@ -253,7 +263,8 @@ def train_constrain_and_scale_krum_proxy(
             knn_vals = torch.topk(dists, k=k, largest=False).values
 
             # Sharper local density matching
-            knn_loss = torch.mean(knn_vals[: max(1, k // 2)])
+            topk = knn_vals[: max(1, k // 2)]
+            knn_loss = torch.mean(topk ** 2)
 
             # Local anchor
             anchor_loss = torch.mean((delta_adv - local_krum_anchor) ** 2)
@@ -302,6 +313,8 @@ def train_constrain_and_scale_krum_proxy(
 
         adv_norm = torch.norm(delta_adv) + eps
         delta_adv = delta_adv * (target_norm / adv_norm)
+
+        delta_adv = delta_adv * 0.995
 
         vector_to_parameters(g + delta_adv, net.parameters())
 

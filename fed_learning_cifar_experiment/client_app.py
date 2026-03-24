@@ -250,10 +250,10 @@ class FlowerClient(NumPyClient):
                     label_smoothing=0.0,
                     weight_decay=0.0,
                     lambda_norm_match=0.10,
-                    lambda_krum_proxy=0.15,
-                    lambda_anchor=0.02,
+                    lambda_krum_proxy=0.30,
+                    lambda_anchor=0.05,
                     lambda_centroid=0.0,
-                    lambda_temporal=0.10,
+                    lambda_temporal=0.02,
                     prev_malicious_delta=prev_malicious_delta,
                     krum_k=7,
                 )
@@ -276,8 +276,8 @@ class FlowerClient(NumPyClient):
                 }
 
         else:
-            sampled_lr = random.choice([0.003, 0.005, 0.007])
-            sampled_epochs = random.choice([3, 5, 7])
+            sampled_lr = random.choice([0.003, 0.004, 0.005])
+            sampled_epochs = random.choice([2, 3, 4, 5])
             train_loss, final_vec = train(
                 self.net,
                 self.training_set,
