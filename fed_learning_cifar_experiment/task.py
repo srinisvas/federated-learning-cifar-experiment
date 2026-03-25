@@ -212,7 +212,10 @@ def train_constrain_and_scale_krum_proxy(
             knn_loss = torch.mean(knn_vals)
 
             # Anchor
-            anchor_loss = torch.mean((delta_adv - anchor) ** 2)
+            anchor_unit = anchor / (torch.norm(anchor) + eps)
+            delta_unit = delta_adv / (torch.norm(delta_adv) + eps)
+
+            anchor_loss = 1.0 - torch.sum(delta_unit * anchor_unit)
 
             loss = (
                 0.4 * ce
@@ -234,26 +237,38 @@ def train_constrain_and_scale_krum_proxy(
         delta_adv = w - g
 
         ref_norms = torch.norm(refs, dim=1)
-        norm_lo = torch.quantile(ref_norms, 0.20)
-        norm_hi = torch.quantile(ref_norms, 0.50)
+
+        # Keep norm in a benign-ish band, but not too low
+        norm_lo = torch.quantile(ref_norms, 0.35)
+        norm_hi = torch.quantile(ref_norms, 0.60)
 
         adv_norm = torch.norm(delta_adv) + eps
         target_norm = torch.clamp(adv_norm, min=norm_lo, max=norm_hi)
         delta_adv = delta_adv * (target_norm / adv_norm)
 
-        # cap distance to anchor relative to benign spread
-        ref_to_anchor = torch.norm(refs - anchor.unsqueeze(0), dim=1)
-        max_anchor_dist = torch.quantile(ref_to_anchor, 0.50)
+        # Anchor decomposition
+        anchor_unit = anchor / (torch.norm(anchor) + eps)
 
-        delta_to_anchor = delta_adv - anchor
-        dist_anchor = torch.norm(delta_to_anchor) + eps
-        if dist_anchor > max_anchor_dist:
-            delta_adv = anchor + delta_to_anchor * (max_anchor_dist / dist_anchor)
+        proj_mag = torch.dot(delta_adv, anchor_unit)
+        proj_vec = proj_mag * anchor_unit
+        resid_vec = delta_adv - proj_vec
 
-        # small final pull only
-        delta_adv = 0.9 * delta_adv + 0.1 * anchor
+        # Match only the projection magnitude to anchor more tightly
+        anchor_mag = torch.dot(anchor, anchor_unit)
+
+        # Soft pull, not hard overwrite
+        proj_vec = (0.80 * proj_vec) + (0.20 * anchor_mag * anchor_unit)
+
+        # Preserve most of the residual to avoid forgetting
+        resid_vec = 0.95 * resid_vec
+
+        delta_adv = proj_vec + resid_vec
+
+        # Very light final blend only
+        delta_adv = 0.95 * delta_adv + 0.05 * anchor
 
         vector_to_parameters(g + delta_adv, net.parameters())
+
 
     return parameters_to_vector(net.parameters()).detach().cpu().clone()
 
