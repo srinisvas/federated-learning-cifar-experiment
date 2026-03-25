@@ -209,7 +209,7 @@ def train_constrain_and_scale_krum_proxy(
             dists = torch.sum(diff * diff, dim=1)
             k = min(krum_k, dists.numel())
             knn_vals = torch.topk(dists, k=k, largest=False).values
-            knn_loss = torch.mean(knn_vals[: max(1, k // 2)])
+            knn_loss = torch.mean(knn_vals)
 
             # Anchor
             anchor_loss = torch.mean((delta_adv - anchor) ** 2)
