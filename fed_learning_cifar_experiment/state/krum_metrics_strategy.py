@@ -185,12 +185,6 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
 
         sampled_ids = [c.cid for c in sampled_clients]
 
-        benign_clients = [
-            c for c in sampled_clients if c.cid not in malicious_ids
-        ]
-
-        ref_clients = benign_clients[:6]
-
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         nds = parameters_to_ndarrays(parameters)
@@ -201,11 +195,11 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
 
         init_vec = parameters_to_vector(model_tmp.parameters()).detach().cpu()
 
+        ref_partition_ids = random.sample(range(self.num_clients), 6)
+
         ref_deltas = []
 
-        for client in ref_clients:
-            pid = self._get_partition_id(client)
-
+        for pid in ref_partition_ids:
             train_loader, _ = load_data(
                 partition_id=pid,
                 num_partitions=self.num_clients,
