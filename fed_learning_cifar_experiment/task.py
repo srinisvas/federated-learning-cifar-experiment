@@ -212,7 +212,10 @@ def train_constrain_and_scale_krum_proxy(
             knn_loss = torch.mean(knn_vals)
 
             # Anchor
-            anchor_loss = torch.mean((delta_adv - anchor) ** 2)
+            anchor_unit = anchor / (torch.norm(anchor) + eps)
+            delta_unit = delta_adv / (torch.norm(delta_adv) + eps)
+
+            anchor_loss = 1.0 - torch.sum(delta_unit * anchor_unit)
 
             loss = (
                 0.4 * ce
@@ -226,21 +229,46 @@ def train_constrain_and_scale_krum_proxy(
             optimizer.step()
 
     # -------------------------
-    # Final Projection (CRITICAL)
+    # Final Projection
     # -------------------------
+
     with torch.no_grad():
         w = parameters_to_vector(net.parameters())
         delta_adv = w - g
 
         ref_norms = torch.norm(refs, dim=1)
 
-        target_norm = torch.quantile(ref_norms, 0.2)
-        delta_adv = delta_adv * (target_norm / (torch.norm(delta_adv) + eps))
+        # Keep norm in a benign-ish band, but not too low
+        norm_lo = torch.quantile(ref_norms, 0.35)
+        norm_hi = torch.quantile(ref_norms, 0.60)
 
-        # direct anchor projection (cheap + powerful)
-        delta_adv = 0.7 * delta_adv + 0.3 * anchor
+        adv_norm = torch.norm(delta_adv) + eps
+        target_norm = torch.clamp(adv_norm, min=norm_lo, max=norm_hi)
+        delta_adv = delta_adv * (target_norm / adv_norm)
+
+        # Anchor decomposition
+        anchor_unit = anchor / (torch.norm(anchor) + eps)
+
+        proj_mag = torch.dot(delta_adv, anchor_unit)
+        proj_vec = proj_mag * anchor_unit
+        resid_vec = delta_adv - proj_vec
+
+        # Match only the projection magnitude to anchor more tightly
+        anchor_mag = torch.dot(anchor, anchor_unit)
+
+        # Soft pull, not hard overwrite
+        proj_vec = (0.80 * proj_vec) + (0.20 * anchor_mag * anchor_unit)
+
+        # Preserve most of the residual to avoid forgetting
+        resid_vec = 0.95 * resid_vec
+
+        delta_adv = proj_vec + resid_vec
+
+        # Very light final blend only
+        delta_adv = 0.95 * delta_adv + 0.05 * anchor
 
         vector_to_parameters(g + delta_adv, net.parameters())
+
 
     return parameters_to_vector(net.parameters()).detach().cpu().clone()
 
