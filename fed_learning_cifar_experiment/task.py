@@ -142,7 +142,10 @@ def train_constrain_and_scale_krum_proxy(
     g = init_vec.detach().to(device)
     vector_to_parameters(g, net.parameters())
 
-    refs = torch.stack(ref_clean_deltas, dim=0).to(device)
+    if isinstance(ref_clean_deltas, torch.Tensor):
+        refs = ref_clean_deltas.to(device)
+    else:
+        refs = torch.stack(ref_clean_deltas, dim=0).to(device)
 
     clean_delta_dev = clean_delta.to(device)
     clean_norm = torch.norm(clean_delta_dev) + eps
