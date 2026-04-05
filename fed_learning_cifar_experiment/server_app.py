@@ -34,9 +34,12 @@ def server_fn(context: Context):
     cs_alpha = str(context.run_config.get("cs-alpha", "0.5"))
     cs_epochs = str(context.run_config.get("cs-epochs", "10"))
     cs_lr = str(context.run_config.get("cs-lr", "0.01"))
-    cs_ano_type = str(context.run_config.get("cs-ano-type", "l2"))
+    cs_ano_type = str(context.run_config.get("cs-ano-type", "krum"))
     cs_gamma = context.run_config.get("cs-gamma", None)
     cs_gamma_bound = context.run_config.get("cs-gamma-bound", None)
+    cs_scale_mode = str(context.run_config.get("cs-scale-mode", "norm_match"))
+    cs_krum_k = str(context.run_config.get("cs-krum-k", "7"))
+
     if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "train-and-scale":
         hardcoded_rounds = [1]
         #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
@@ -96,6 +99,8 @@ def server_fn(context: Context):
             on_fit_config["cs-epochs"] = cs_epochs
             on_fit_config["cs-lr"] = cs_lr
             on_fit_config["cs-ano-type"] = cs_ano_type
+            on_fit_config["cs-scale-mode"] = cs_scale_mode
+            on_fit_config["cs-krum-k"] = cs_krum_k
             if cs_gamma is not None:
                 on_fit_config["cs-gamma"] = str(cs_gamma)
             if cs_gamma_bound is not None:

@@ -186,14 +186,12 @@ class FlowerClient(NumPyClient):
 
             elif attack_type == "constrain-and-scale-paper":
                 # --------------------------------------------------------
-                # Paper-faithful Algorithm 1: Bagdasaryan et al. (2020)
-                # Single unified loss, mixed batches, post-training scale
+                # Algorithm 1: Bagdasaryan et al. (2020) with pluggable L_ano
+                # Single unified loss, mixed batches, post-training scaling
                 # --------------------------------------------------------
-                # training_data already has backdoor-injected batches
-                # (collate_with_backdoor mixes c=20 backdoor per batch of 64)
-
+                # Parse cs-* hyperparameters from config (all have defaults)
                 alpha_cs = float(config.get("cs-alpha", "0.5"))
-                ano_type = config.get("cs-ano-type", "l2")
+                ano_type = config.get("cs-ano-type", "krum")
                 cs_epochs = int(config.get("cs-epochs", "10"))
                 cs_lr = float(config.get("cs-lr", "0.01"))
                 cs_gamma = config.get("cs-gamma", None)
@@ -202,6 +200,16 @@ class FlowerClient(NumPyClient):
                 cs_gamma_bound = config.get("cs-gamma-bound", None)
                 if cs_gamma_bound is not None:
                     cs_gamma_bound = float(cs_gamma_bound)
+                cs_scale_mode = config.get("cs-scale-mode", "norm_match")
+                cs_krum_k = int(config.get("cs-krum-k", "7"))
+
+                # Parse reference deltas (sent by Krum/MultiKrum strategies)
+                paper_ref_deltas = None
+                if "shared_ref_deltas" in config:
+                    paper_ref_deltas = torch.tensor(
+                        json.loads(config["shared_ref_deltas"]),
+                        dtype=torch.float32,
+                    )
 
                 train_loss, final_vec = train_constrain_and_scale_paper(
                     net=self.net,
@@ -216,7 +224,10 @@ class FlowerClient(NumPyClient):
                     eta=1.0,
                     gamma_bound=cs_gamma_bound,
                     ano_type=ano_type,
+                    ref_deltas=paper_ref_deltas,
+                    krum_k=cs_krum_k,
                     label_smoothing=0.0,
+                    scale_mode=cs_scale_mode,
                 )
 
                 vector_to_parameters(final_vec.to(self.device), self.net.parameters())
@@ -227,10 +238,11 @@ class FlowerClient(NumPyClient):
                     "attack": "constrain-and-scale-paper",
                     "train_loss": train_loss,
                     "attack_step": attack_step,
-                    "gamma": cs_gamma if cs_gamma is not None else num_clients_total,
+                    "ano_type": ano_type,
+                    "scale_mode": cs_scale_mode,
                 }
 
-            elif attack_type == "constrain-and-scale-krum-proxy":
+            elif attack_type in ("constrain-and-scale", "constrain-and-scale-krum-proxy"):
                 clean_training_set, _ = load_data(
                     partition_id,
                     num_partitions,
@@ -323,9 +335,9 @@ class FlowerClient(NumPyClient):
 
             else:
                 raise ValueError(
-                    f"Unknown attack_type '{attack_type}'. "
+                    f"Unknown backdoor-attack-type '{attack_type}'. "
                     "Expected: 'train-and-scale', 'constrain-and-scale-paper', "
-                    "or 'constrain-and-scale-krum-proxy'."
+                    "'constrain-and-scale', or 'constrain-and-scale-krum-proxy'."
                 )
 
         else:

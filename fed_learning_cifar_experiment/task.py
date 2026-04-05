@@ -15,6 +15,7 @@ from torch.nn.utils import parameters_to_vector, vector_to_parameters
 import copy
 import torch
 import torch.nn.functional as F
+import numpy as np
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 from fed_learning_cifar_experiment.utils.backdoor_attack import collate_with_backdoor
@@ -416,6 +417,7 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
     return avg_training_loss, final_vec
 
+
 def train_constrain_and_scale_paper(
     net,
     training_data,
@@ -432,51 +434,71 @@ def train_constrain_and_scale_paper(
     gamma_bound: float = None,             # max allowed gamma (anomaly detector bound S)
 
     # --- Anomaly loss type ---
-    ano_type: str = "l2",                  # "l2" | "cosine" | "l2+cosine"
+    ano_type: str = "l2",                  # "l2" | "cosine" | "l2+cosine" | "krum" | "krum+l2"
     lambda_cosine: float = 1.0,            # weight for cosine term when using "l2+cosine"
 
+    # --- Krum-aware L_ano (required when ano_type contains "krum") ---
+    ref_deltas: torch.Tensor = None,       # [num_refs, D] reference benign deltas
+    krum_k: int = 7,                       # k-nearest neighbors for Krum proxy
+    lambda_l2: float = 0.01,              # L2 weight in "krum+l2" mode
+
     # --- LR schedule ---
-    step_schedule: list = None,            # epochs at which to decay LR (paper: step_sched)
-    step_rate: float = 10.0,               # LR divisor at each step (paper: step_rate)
+    step_schedule: list = None,            # epochs at which to decay LR
+    step_rate: float = 10.0,               # LR divisor at each step
 
     # --- Early stop ---
     epsilon_ce: float = None,              # stop if L_class < epsilon
 
     # --- Loss config ---
     label_smoothing: float = 0.0,
+
+    # --- Post-training scaling mode ---
+    scale_mode: str = "gamma",             # "gamma" | "norm_match"
 ):
     """
-    Faithful implementation of Algorithm 1 from Bagdasaryan et al. (2020)
-    "How To Backdoor Federated Learning" (AISTATS 2020).
+    Algorithm 1 from Bagdasaryan et al. (2020) with defense-aware L_ano.
 
-    Key design:
-      1. Initialize X = G_t
-      2. Single unified loss: L = alpha * L_class + (1 - alpha) * L_ano
-         - L_class: standard CE on mixed batches (clean + backdoor, handled by DataLoader)
-         - L_ano: distance-based anomaly penalty (L2 to G_t, optionally + cosine)
-      3. Train with step LR decay and optional early stopping
-      4. Post-training scaling: L^{t+1} = gamma * (X - G_t) + G_t
+    The paper's framework is: L = alpha * L_class + (1-alpha) * L_ano
+    where L_ano is pluggable for the target defense.
 
-    The training_data DataLoader should already produce mixed batches
-    (clean + backdoor samples via collate_with_backdoor). This function
-    does NOT need separate clean/backdoor loaders.
+    ano_type options:
+      "l2"       - ||X - G_t||^2. For FedAvg / weight-magnitude detectors.
+      "cosine"   - 1 - cos(delta, G_t). For cosine-similarity detectors.
+      "l2+cosine"- weighted combination.
+      "krum"     - Krum proxy: minimize sum of k-nearest distances to
+                   reference benign deltas. For Krum / MultiKrum.
+      "krum+l2"  - Krum proxy + mild L2 norm regularization. Recommended
+                   for Krum since it optimizes cluster proximity AND
+                   keeps update magnitude reasonable.
 
-    Args:
-        gamma: If None, defaults to n/eta (paper's theoretical optimum for
-               full model replacement). Can be clamped by gamma_bound.
-        ano_type: Type of anomaly detection to evade:
-            - "l2": L_ano = ||X - G_t||^2  (evades weight-magnitude detectors)
-            - "cosine": L_ano = 1 - cos(X - G_t, G_t)  (evades cosine-similarity detectors)
-            - "l2+cosine": weighted combination of both
-        step_schedule: List of epoch indices where LR is divided by step_rate.
-            If None, defaults to [epochs//2, 3*epochs//4].
+    scale_mode options:
+      "gamma"      - standard post-train scaling by gamma (paper default).
+      "norm_match" - scale delta to match median benign delta norm.
+                     Stealthier for Krum since it avoids magnitude outliers.
     """
     net = net.to(device)
     net.train()
 
+    # Validate Krum mode requirements
+    uses_krum = "krum" in ano_type
+    if uses_krum and ref_deltas is None:
+        raise ValueError(
+            f"ano_type='{ano_type}' requires ref_deltas (benign reference "
+            "deltas from the server). Pass shared_ref_deltas from config."
+        )
+
     # Step 1: Initialize X = G_t
     g = init_vec.detach().to(device)
     vector_to_parameters(g, net.parameters())
+
+    # Move references to device if needed
+    refs_dev = None
+    ref_median_norm = None
+    if ref_deltas is not None:
+        if isinstance(ref_deltas, np.ndarray):
+            ref_deltas = torch.from_numpy(ref_deltas).float()
+        refs_dev = ref_deltas.to(device)
+        ref_median_norm = torch.median(torch.norm(refs_dev, dim=1)).item()
 
     # Default LR schedule
     if step_schedule is None:
@@ -486,10 +508,12 @@ def train_constrain_and_scale_paper(
     current_lr = lr
     optimizer = torch.optim.SGD(net.parameters(), lr=current_lr, momentum=0.9)
 
+    eps = 1e-12
+
     # Step 2-3: Train with unified loss
     for epoch in range(epochs):
 
-        # LR step decay (paper: "if epoch e in step_sched, lr = lr / step_rate")
+        # LR step decay
         if epoch in step_schedule:
             current_lr /= step_rate
             for pg in optimizer.param_groups:
@@ -508,24 +532,46 @@ def train_constrain_and_scale_paper(
 
             optimizer.zero_grad(set_to_none=True)
 
-            # L_class: classification loss on mixed batch (clean + backdoor)
+            # L_class: CE on mixed batch (clean + backdoor via collate_with_backdoor)
             logits = net(images)
             l_class = criterion(logits, labels)
 
-            # L_ano: anomaly detection evasion
+            # L_ano: defense-specific anomaly penalty
             w = parameters_to_vector(net.parameters())
             delta = w - g
 
             if ano_type == "l2":
                 l_ano = torch.sum(delta * delta)
+
             elif ano_type == "cosine":
                 cos_sim = F.cosine_similarity(delta.unsqueeze(0), g.unsqueeze(0))
                 l_ano = 1.0 - cos_sim.squeeze()
+
             elif ano_type == "l2+cosine":
                 l2_term = torch.sum(delta * delta)
                 cos_sim = F.cosine_similarity(delta.unsqueeze(0), g.unsqueeze(0))
                 cos_term = 1.0 - cos_sim.squeeze()
                 l_ano = l2_term + lambda_cosine * cos_term
+
+            elif ano_type == "krum":
+                # Krum proxy: minimize distance to k-nearest reference deltas
+                # This directly optimizes what Krum measures for selection
+                diff = refs_dev - delta.unsqueeze(0)          # [num_refs, D]
+                dists_sq = torch.sum(diff * diff, dim=1)      # [num_refs]
+                k_eff = min(krum_k, dists_sq.numel())
+                knn_vals = torch.topk(dists_sq, k=k_eff, largest=False).values
+                l_ano = torch.mean(knn_vals)
+
+            elif ano_type == "krum+l2":
+                # Krum proximity + mild L2 to keep norm reasonable
+                diff = refs_dev - delta.unsqueeze(0)
+                dists_sq = torch.sum(diff * diff, dim=1)
+                k_eff = min(krum_k, dists_sq.numel())
+                knn_vals = torch.topk(dists_sq, k=k_eff, largest=False).values
+                krum_loss = torch.mean(knn_vals)
+                l2_loss = torch.sum(delta * delta)
+                l_ano = krum_loss + lambda_l2 * l2_loss
+
             else:
                 raise ValueError(f"Unknown ano_type: {ano_type}")
 
@@ -533,35 +579,43 @@ def train_constrain_and_scale_paper(
             loss = alpha * l_class + (1.0 - alpha) * l_ano
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
             optimizer.step()
 
             running_class_loss += float(l_class.detach().cpu())
             steps += 1
 
-        # Early stop if classification loss converged
         avg_class_loss = running_class_loss / max(1, steps)
         if epsilon_ce is not None and avg_class_loss < epsilon_ce:
             break
 
     # Step 4: Post-training scaling
-    # L^{t+1} = gamma * (X - G_t) + G_t
     with torch.no_grad():
         x = parameters_to_vector(net.parameters()).detach()
         delta_final = x - g
 
-        # Compute scaling factor
-        if gamma is None:
-            gamma = n_participants / eta  # paper: gamma = n / eta
+        if scale_mode == "norm_match" and ref_median_norm is not None:
+            # Scale delta to match median benign update norm
+            # This is the stealthiest option for Krum: magnitude looks benign
+            current_norm = torch.norm(delta_final).item()
+            if current_norm > eps:
+                scale = ref_median_norm / current_norm
+                scaled_vec = g + scale * delta_final
+            else:
+                scaled_vec = x
+        else:
+            # Standard gamma scaling (paper default)
+            if gamma is None:
+                gamma = n_participants / eta
 
-        # Optionally clamp gamma by anomaly detector bound S
-        # Paper Eq. 5: gamma = S / ||X - G_t||_2
-        if gamma_bound is not None:
-            delta_norm = torch.norm(delta_final).item()
-            if delta_norm > 1e-12:
-                max_gamma = gamma_bound / delta_norm
-                gamma = min(gamma, max_gamma)
+            if gamma_bound is not None:
+                delta_norm = torch.norm(delta_final).item()
+                if delta_norm > eps:
+                    max_gamma = gamma_bound / delta_norm
+                    gamma = min(gamma, max_gamma)
 
-        scaled_vec = g + gamma * delta_final
+            scaled_vec = g + gamma * delta_final
+
         vector_to_parameters(scaled_vec, net.parameters())
 
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
