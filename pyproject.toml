@@ -38,18 +38,22 @@ num-server-rounds = 10
 fraction-fit = 0.1
 fraction_evaluate = 0.1
 local-epochs = 2
-backdoor-attack-mode="per-round"
-backdoor-attack-type="train-and-scale"
 num-malicious-clients=1
 num-malicious-clients-per-round=1
 num-clients=100
 malicious-client-id=2
 simulation-id="exp-999"
-aggregation-method="FedAvg"
 ray-num-cpus = 2
 ray-num-gpus = 1
 num-of-malicious-clients-per-round = 1
 attacker-selection-mode="random"
+backdoor-attack-mode = "per-round-attack"
+backdoor-attack-type = "constrain-and-scale-paper"
+aggregation-method = "Fedavg"
+cs-alpha = 0.5
+cs-epochs = 10
+cs-lr = 0.01
+cs-ano-type = "l2"
 
 # Default federation to use when running the app
 [tool.flwr.federations]

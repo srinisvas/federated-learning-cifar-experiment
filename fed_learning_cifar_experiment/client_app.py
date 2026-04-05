@@ -12,7 +12,8 @@ from flwr.common import Parameters, parameters_to_ndarrays
 from fed_learning_cifar_experiment.task import (
     get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
     get_basic_cnn_model, train_backdoor, krum_safe_scale,
-    train_constrain_and_scale_krum_proxy, build_reference_clean_deltas
+    train_constrain_and_scale_krum_proxy, build_reference_clean_deltas,
+    train_constrain_and_scale_paper
 )
 from fed_learning_cifar_experiment.utils.evaluate_attack import evaluate_asr
 
@@ -183,7 +184,53 @@ class FlowerClient(NumPyClient):
                 self.prev_global_vec = init_vec.clone()
                 return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
 
-            else:
+            elif attack_type == "constrain-and-scale-paper":
+                # --------------------------------------------------------
+                # Paper-faithful Algorithm 1: Bagdasaryan et al. (2020)
+                # Single unified loss, mixed batches, post-training scale
+                # --------------------------------------------------------
+                # training_data already has backdoor-injected batches
+                # (collate_with_backdoor mixes c=20 backdoor per batch of 64)
+
+                alpha_cs = float(config.get("cs-alpha", "0.5"))
+                ano_type = config.get("cs-ano-type", "l2")
+                cs_epochs = int(config.get("cs-epochs", "10"))
+                cs_lr = float(config.get("cs-lr", "0.01"))
+                cs_gamma = config.get("cs-gamma", None)
+                if cs_gamma is not None:
+                    cs_gamma = float(cs_gamma)
+                cs_gamma_bound = config.get("cs-gamma-bound", None)
+                if cs_gamma_bound is not None:
+                    cs_gamma_bound = float(cs_gamma_bound)
+
+                train_loss, final_vec = train_constrain_and_scale_paper(
+                    net=self.net,
+                    training_data=self.training_set,
+                    device=self.device,
+                    init_vec=init_vec.cpu(),
+                    epochs=cs_epochs,
+                    lr=cs_lr,
+                    alpha=alpha_cs,
+                    gamma=cs_gamma,
+                    n_participants=num_clients_total,
+                    eta=1.0,
+                    gamma_bound=cs_gamma_bound,
+                    ano_type=ano_type,
+                    label_smoothing=0.0,
+                )
+
+                vector_to_parameters(final_vec.to(self.device), self.net.parameters())
+                self.prev_global_vec = init_vec.clone()
+
+                attack_step = torch.norm(final_vec - init_vec.cpu()).item()
+                return get_weights(self.net), len(self.training_set.dataset), {
+                    "attack": "constrain-and-scale-paper",
+                    "train_loss": train_loss,
+                    "attack_step": attack_step,
+                    "gamma": cs_gamma if cs_gamma is not None else num_clients_total,
+                }
+
+            elif attack_type == "constrain-and-scale-krum-proxy":
                 clean_training_set, _ = load_data(
                     partition_id,
                     num_partitions,
@@ -273,6 +320,13 @@ class FlowerClient(NumPyClient):
                     "clean_step": clean_step,
                     "attack_step": attack_step,
                 }
+
+            else:
+                raise ValueError(
+                    f"Unknown attack_type '{attack_type}'. "
+                    "Expected: 'train-and-scale', 'constrain-and-scale-paper', "
+                    "or 'constrain-and-scale-krum-proxy'."
+                )
 
         else:
             sampled_lr = random.choice([0.003, 0.004, 0.005])

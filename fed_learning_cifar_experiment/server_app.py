@@ -29,6 +29,14 @@ def server_fn(context: Context):
     num_of_malicious_clients_per_round = context.run_config.get("num-malicious-clients-per-round", 1)
     attacker_selection_mode = context.run_config.get("attacker-selection-mode", "random").lower()
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
+
+    # Constrain-and-scale-paper hyperparameters (Algorithm 1, Bagdasaryan et al.)
+    cs_alpha = str(context.run_config.get("cs-alpha", "0.5"))
+    cs_epochs = str(context.run_config.get("cs-epochs", "10"))
+    cs_lr = str(context.run_config.get("cs-lr", "0.01"))
+    cs_ano_type = str(context.run_config.get("cs-ano-type", "l2"))
+    cs_gamma = context.run_config.get("cs-gamma", None)
+    cs_gamma_bound = context.run_config.get("cs-gamma-bound", None)
     if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "train-and-scale":
         hardcoded_rounds = [1]
         #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
@@ -36,6 +44,9 @@ def server_fn(context: Context):
     if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "constrain-and-scale":
         hardcoded_rounds = [1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56, 61, 66, 71, 76, 81, 86, 91, 96]
         #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
+        backdoor_rounds = json.dumps(hardcoded_rounds)
+    if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "constrain-and-scale-paper":
+        hardcoded_rounds = [1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56, 61, 66, 71, 76, 81, 86, 91, 96]
         backdoor_rounds = json.dumps(hardcoded_rounds)
     # Initialize model parameter
 
@@ -78,6 +89,18 @@ def server_fn(context: Context):
                 on_fit_config["malicious-client-ids"] = context.run_config.get(
                     "malicious-client-ids", "[]"
                 )
+
+        # Append constrain-and-scale-paper hyperparams when relevant
+        if backdoor_attack_type == "constrain-and-scale-paper":
+            on_fit_config["cs-alpha"] = cs_alpha
+            on_fit_config["cs-epochs"] = cs_epochs
+            on_fit_config["cs-lr"] = cs_lr
+            on_fit_config["cs-ano-type"] = cs_ano_type
+            if cs_gamma is not None:
+                on_fit_config["cs-gamma"] = str(cs_gamma)
+            if cs_gamma_bound is not None:
+                on_fit_config["cs-gamma-bound"] = str(cs_gamma_bound)
+
         return on_fit_config
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

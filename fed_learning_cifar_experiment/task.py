@@ -416,6 +416,158 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
     return avg_training_loss, final_vec
 
+def train_constrain_and_scale_paper(
+    net,
+    training_data,
+    device,
+    init_vec: torch.Tensor,               # G_t (flattened global model)
+
+    # --- Algorithm 1 hyperparameters ---
+    epochs: int = 10,
+    lr: float = 0.01,
+    alpha: float = 0.5,                    # balance: alpha*L_class + (1-alpha)*L_ano
+    gamma: float = None,                   # post-train scale factor; if None, use n/eta
+    n_participants: int = 100,             # total participants n
+    eta: float = 1.0,                      # global learning rate eta
+    gamma_bound: float = None,             # max allowed gamma (anomaly detector bound S)
+
+    # --- Anomaly loss type ---
+    ano_type: str = "l2",                  # "l2" | "cosine" | "l2+cosine"
+    lambda_cosine: float = 1.0,            # weight for cosine term when using "l2+cosine"
+
+    # --- LR schedule ---
+    step_schedule: list = None,            # epochs at which to decay LR (paper: step_sched)
+    step_rate: float = 10.0,               # LR divisor at each step (paper: step_rate)
+
+    # --- Early stop ---
+    epsilon_ce: float = None,              # stop if L_class < epsilon
+
+    # --- Loss config ---
+    label_smoothing: float = 0.0,
+):
+    """
+    Faithful implementation of Algorithm 1 from Bagdasaryan et al. (2020)
+    "How To Backdoor Federated Learning" (AISTATS 2020).
+
+    Key design:
+      1. Initialize X = G_t
+      2. Single unified loss: L = alpha * L_class + (1 - alpha) * L_ano
+         - L_class: standard CE on mixed batches (clean + backdoor, handled by DataLoader)
+         - L_ano: distance-based anomaly penalty (L2 to G_t, optionally + cosine)
+      3. Train with step LR decay and optional early stopping
+      4. Post-training scaling: L^{t+1} = gamma * (X - G_t) + G_t
+
+    The training_data DataLoader should already produce mixed batches
+    (clean + backdoor samples via collate_with_backdoor). This function
+    does NOT need separate clean/backdoor loaders.
+
+    Args:
+        gamma: If None, defaults to n/eta (paper's theoretical optimum for
+               full model replacement). Can be clamped by gamma_bound.
+        ano_type: Type of anomaly detection to evade:
+            - "l2": L_ano = ||X - G_t||^2  (evades weight-magnitude detectors)
+            - "cosine": L_ano = 1 - cos(X - G_t, G_t)  (evades cosine-similarity detectors)
+            - "l2+cosine": weighted combination of both
+        step_schedule: List of epoch indices where LR is divided by step_rate.
+            If None, defaults to [epochs//2, 3*epochs//4].
+    """
+    net = net.to(device)
+    net.train()
+
+    # Step 1: Initialize X = G_t
+    g = init_vec.detach().to(device)
+    vector_to_parameters(g, net.parameters())
+
+    # Default LR schedule
+    if step_schedule is None:
+        step_schedule = [epochs // 2, 3 * epochs // 4]
+
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing).to(device)
+    current_lr = lr
+    optimizer = torch.optim.SGD(net.parameters(), lr=current_lr, momentum=0.9)
+
+    # Step 2-3: Train with unified loss
+    for epoch in range(epochs):
+
+        # LR step decay (paper: "if epoch e in step_sched, lr = lr / step_rate")
+        if epoch in step_schedule:
+            current_lr /= step_rate
+            for pg in optimizer.param_groups:
+                pg["lr"] = current_lr
+
+        running_class_loss = 0.0
+        steps = 0
+
+        for batch in training_data:
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+
+            # L_class: classification loss on mixed batch (clean + backdoor)
+            logits = net(images)
+            l_class = criterion(logits, labels)
+
+            # L_ano: anomaly detection evasion
+            w = parameters_to_vector(net.parameters())
+            delta = w - g
+
+            if ano_type == "l2":
+                l_ano = torch.sum(delta * delta)
+            elif ano_type == "cosine":
+                cos_sim = F.cosine_similarity(delta.unsqueeze(0), g.unsqueeze(0))
+                l_ano = 1.0 - cos_sim.squeeze()
+            elif ano_type == "l2+cosine":
+                l2_term = torch.sum(delta * delta)
+                cos_sim = F.cosine_similarity(delta.unsqueeze(0), g.unsqueeze(0))
+                cos_term = 1.0 - cos_sim.squeeze()
+                l_ano = l2_term + lambda_cosine * cos_term
+            else:
+                raise ValueError(f"Unknown ano_type: {ano_type}")
+
+            # Unified loss (Eq. 4 from the paper)
+            loss = alpha * l_class + (1.0 - alpha) * l_ano
+
+            loss.backward()
+            optimizer.step()
+
+            running_class_loss += float(l_class.detach().cpu())
+            steps += 1
+
+        # Early stop if classification loss converged
+        avg_class_loss = running_class_loss / max(1, steps)
+        if epsilon_ce is not None and avg_class_loss < epsilon_ce:
+            break
+
+    # Step 4: Post-training scaling
+    # L^{t+1} = gamma * (X - G_t) + G_t
+    with torch.no_grad():
+        x = parameters_to_vector(net.parameters()).detach()
+        delta_final = x - g
+
+        # Compute scaling factor
+        if gamma is None:
+            gamma = n_participants / eta  # paper: gamma = n / eta
+
+        # Optionally clamp gamma by anomaly detector bound S
+        # Paper Eq. 5: gamma = S / ||X - G_t||_2
+        if gamma_bound is not None:
+            delta_norm = torch.norm(delta_final).item()
+            if delta_norm > 1e-12:
+                max_gamma = gamma_bound / delta_norm
+                gamma = min(gamma, max_gamma)
+
+        scaled_vec = g + gamma * delta_final
+        vector_to_parameters(scaled_vec, net.parameters())
+
+    final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
+    return avg_class_loss, final_vec
+
+
 def train_constrain_and_scale(
     net,
     training_data,
