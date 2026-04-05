@@ -30,7 +30,7 @@ def server_fn(context: Context):
     attacker_selection_mode = context.run_config.get("attacker-selection-mode", "random").lower()
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
     if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "train-and-scale":
-        hardcoded_rounds = [1, 51]
+        hardcoded_rounds = [1]
         #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
         backdoor_rounds = json.dumps(hardcoded_rounds)
     if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "constrain-and-scale":
