@@ -8,6 +8,14 @@ from fed_learning_cifar_experiment.utils.logger import (
     write_experiment_summary,
 )
 
+import numpy as np
+import torch
+from torch.nn.utils import parameters_to_vector
+from flwr.common import parameters_to_ndarrays
+from fed_learning_cifar_experiment.task import (
+    get_resnet_cnn_model, set_weights, load_data, train
+)
+
 
 class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
     def __init__(self,
@@ -33,6 +41,8 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         self.num_of_malicious_clients = num_of_malicious_clients
         self.num_of_malicious_clients_per_round = num_of_malicious_clients_per_round
         self._cid_to_partition = {}
+        self.prev_global_parameters = None
+        self._last_round_malicious_ids: list = []
 
     def configure_fit(self, server_round: int, parameters, client_manager):
         num_available = len(client_manager.all())
@@ -40,11 +50,42 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         sampled_clients = list(client_manager.sample(sample_size, min_num))
         sampled_ids = [c.cid for c in sampled_clients]
 
-        # Randomly pick malicious clients from the sampled list
         num_malicious = min(self.num_of_malicious_clients_per_round, len(sampled_ids))
         malicious_ids = random.sample(sampled_ids, num_malicious)
-        #print(f"[Round {server_round}] Sampled clients: {sampled_ids}")
-        #print(f"[Round {server_round}] Malicious clients: {malicious_ids}")
+        self._last_round_malicious_ids = list(map(str, malicious_ids))
+
+        # --- Build shared_ref_deltas (same logic as Krum strategy) ---
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        nds = parameters_to_ndarrays(parameters)
+        model_tmp = get_resnet_cnn_model()
+        set_weights(model_tmp, nds)
+        model_tmp.to(device)
+        init_vec = parameters_to_vector(model_tmp.parameters()).detach().cpu()
+
+        ref_partition_ids = random.sample(range(self.num_clients), 6)
+        ref_deltas = []
+        for pid in ref_partition_ids:
+            train_loader, _ = load_data(
+                partition_id=pid,
+                num_partitions=self.num_clients,
+                alpha_val=0.9,
+                backdoor_enabled=False,
+            )
+            net_ref = get_resnet_cnn_model()
+            set_weights(net_ref, nds)
+            net_ref.to(device)
+            lr = random.choice([0.003, 0.004, 0.005])
+            epochs = random.choice([1, 2])
+            _, vec = train(net_ref, train_loader, epochs, device, lr)
+            delta = (vec - init_vec).cpu().numpy()
+            ref_deltas.append(delta)
+
+        ref_deltas = np.stack(ref_deltas)
+        norms = np.linalg.norm(ref_deltas, axis=1)
+        median_norm = float(np.median(norms))
+        # --- End ref_deltas block ---
+
+        print(f"[Round {server_round}] Sampled: {sampled_ids} | Malicious: {malicious_ids}")
 
         fit_ins_list = []
         for client in sampled_clients:
@@ -53,8 +94,19 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
                 "current-round": server_round,
                 "sampled_client_ids": json.dumps(sampled_ids),
                 "malicious_client_ids": json.dumps(malicious_ids),
-                "is_malicious": str(client.cid in malicious_ids),  # unique per client
+                "is_malicious": str(client.cid in malicious_ids),
+                "shared_ref_deltas": json.dumps(ref_deltas.tolist()),
+                "shared_ref_median_norm": median_norm,
             })
+            # Send prev global so clients can compute delta from it (same as Krum)
+            if self.prev_global_parameters is not None:
+                config["prev_global_tensors_hex"] = json.dumps(
+                    [t.hex() for t in self.prev_global_parameters.tensors]
+                )
+                config["prev_global_tensor_type"] = self.prev_global_parameters.tensor_type
+            else:
+                config["prev_global_tensors_hex"] = "[]"
+                config["prev_global_tensor_type"] = "numpy.ndarray"
             fit_ins_list.append((client, FitIns(parameters, config)))
 
         return fit_ins_list
@@ -115,3 +167,10 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         if rnd == self.num_rounds:
             self.final_centralized_mta = mta
             self.final_centralized_asr = asr
+
+    def aggregate_fit(self, rnd, results, failures):
+        aggregated = super().aggregate_fit(rnd, results, failures)
+        if aggregated is not None:
+            agg_params, _ = aggregated
+            self.prev_global_parameters = agg_params
+        return aggregated
