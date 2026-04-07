@@ -119,7 +119,7 @@ def train_constrain_and_scale_krum_proxy(
     weight_decay=0.0,
 
     lambda_norm_match=0.1,
-    lambda_krum_proxy=0.25,
+    lambda_krum_proxy=0,
     lambda_centroid=0.0,
     lambda_anchor=0.05,
     lambda_temporal=0.0,
