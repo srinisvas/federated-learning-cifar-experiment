@@ -218,7 +218,7 @@ def train_constrain_and_scale_krum_proxy(
             anchor_loss = torch.mean((delta_adv - anchor) ** 2)
 
             loss = (
-                0.4 * ce
+                ce
                 + lambda_norm_match * norm_match
                 + lambda_krum_proxy * knn_loss
                 + lambda_anchor * anchor_loss

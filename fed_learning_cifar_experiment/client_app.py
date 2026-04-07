@@ -296,7 +296,7 @@ class FlowerClient(NumPyClient):
                     label_smoothing=0.0,
                     weight_decay=0.0,
                     lambda_norm_match=0.10,
-                    lambda_krum_proxy=0,
+                    lambda_krum_proxy=0.25,
                     lambda_anchor=0.05,
                     lambda_centroid=0.0,
                     lambda_temporal=0.00,
