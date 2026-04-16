@@ -181,7 +181,12 @@ class FlowerClient(NumPyClient):
                 # print(f"--- DEBUG: ATTACK FINISHED ---\n")
                 vector_to_parameters(scaled_vec.to(self.device), self.net.parameters())
                 self.prev_global_vec = init_vec.clone()
-                return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
+                return get_weights(self.net), len(self.training_set.dataset), {
+                    "train_loss": train_loss,
+                    "local_epochs": int(attack_epochs),
+                    "local_lr": float(learning_rate),
+                    "scale_factor": float(eta),
+                }
 
             else:
                 clean_training_set, _ = load_data(
@@ -272,6 +277,9 @@ class FlowerClient(NumPyClient):
                     "attack": "constrain-and-scale-krum-proxy",
                     "clean_step": clean_step,
                     "attack_step": attack_step,
+                    "local_epochs": 5,
+                    "local_lr": 0.005,
+                    "scale_factor": 1.0,
                 }
 
         else:
@@ -287,7 +295,12 @@ class FlowerClient(NumPyClient):
 
             self.prev_global_vec = init_vec.clone()
 
-            return get_weights(self.net), len(self.training_set.dataset), {"train_loss": train_loss}
+            return get_weights(self.net), len(self.training_set.dataset), {
+                "train_loss": train_loss,
+                "local_epochs": int(sampled_epochs),
+                "local_lr": float(sampled_lr),
+                "scale_factor": 1.0,
+            }
 
     def evaluate(self, parameters, config):
         partition_id = self.context.node_config["partition-id"]

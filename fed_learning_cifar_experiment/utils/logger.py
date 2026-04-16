@@ -87,3 +87,39 @@ def append_distributed_round(simulation_id: str, rnd: int, dist_mta: float, dist
         "num_clients": num_clients,
     }
     _append_csv(path, header, row)
+
+
+def append_per_update_features(
+    metadata: Dict[str, Any],
+    features: Dict[str, Any],
+    out_path: Optional[str] = None,
+):
+    """
+    Append one row of per-update structural features to CSV.
+
+    metadata: dict with identifying / contextual fields (simulation_id, round,
+              cid, partition_id, malicious_flag, attack_mode, attack_type,
+              local_data_size, local_epochs, local_lr, scale_factor,
+              krum_score, krum_rank, selected_by_aggregator, ...).
+    features: dict with the structural feature values produced by
+              metrics_extractor.extract_per_update_features. The schema is
+              expected to be stable across calls (assert via canonical_feature_keys()).
+    out_path: optional override. Defaults to "{out_dir}/per_update_features.csv".
+
+    The header is written on the first call (when the file doesn't exist yet);
+    subsequent calls assume the schema is fixed. If you change the feature set
+    mid-run you'll get column misalignment — delete the file or version it.
+    """
+    from collections import OrderedDict
+    path = out_path or os.path.join(out_dir, "per_update_features.csv")
+    _ensure_dir(os.path.dirname(path) or ".")
+    row: "OrderedDict[str, Any]" = OrderedDict()
+    row["timestamp"] = datetime.utcnow().isoformat()
+    row.update(metadata)
+    row.update(features)
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        if write_header:
+            writer.writeheader()
+        writer.writerow({k: ("" if v is None else v) for k, v in row.items()})

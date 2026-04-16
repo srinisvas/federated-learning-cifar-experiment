@@ -15,6 +15,15 @@ from flwr.common import GetPropertiesIns
 from fed_learning_cifar_experiment.utils.logger import (
     append_distributed_round,
     write_experiment_summary,
+    append_per_update_features,
+)
+from fed_learning_cifar_experiment.utils.metrics_extractor import (
+    ParamRegistry,
+    nds_to_trainable_state_dict,
+    state_dict_delta,
+    flat_param_vec_to_per_key_dict,
+    mean_delta_per_key,
+    extract_per_update_features,
 )
 
 from flwr.common import parameters_to_ndarrays
@@ -98,6 +107,25 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         self.last_krum_selected_cid: Optional[str] = None
         self.last_krum_selected_delta: Optional[np.ndarray] = None
         self._last_round_malicious_ids: List[str] = []
+
+        # ----- per-update feature extraction state -----
+        # Built lazily on first configure_fit call from a fresh model instance.
+        self._param_registry: Optional[ParamRegistry] = None
+        # Captured at start of each configure_fit so aggregate_fit has an
+        # unambiguous reference to the global model that went INTO this round
+        # (avoids the "round 1 prev_global is None" edge case).
+        self._round_global_parameters: Optional[Parameters] = None
+        # Reference clean deltas this round (np.ndarray of shape [num_refs, D_params]).
+        # Same reference set used by the constrain-and-scale attacker, but kept
+        # server-side for honest analysis.
+        self._round_ref_deltas_flat: Optional[np.ndarray] = None
+        # Attack-mode / type for this round (snooped from on_fit_config_fn so we
+        # don't need to change server_app.py).
+        self._round_attack_mode: str = "none"
+        self._round_attack_type: str = "none"
+        # Sampled ids and malicious ids for this round (also stashed for metadata).
+        self._round_sampled_ids: List[str] = []
+        self._round_malicious_ids_set: set = set()
 
     def _get_partition_id(self, client: ClientProxy) -> int:
         if client.cid in self._cid_to_partition:
@@ -271,6 +299,37 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                 config["prev_global_tensor_type"] = "numpy.ndarray"
 
             fit_ins_list.append((client, FitIns(parameters, config)))
+
+        # ---- Stash per-round state for aggregate_fit / extraction ----
+        # Lazy-init the param registry from a fresh model instance.
+        if self._param_registry is None:
+            tmp_model = get_resnet_cnn_model()
+            self._param_registry = ParamRegistry(tmp_model)
+            print(
+                f"[Extractor] ParamRegistry built: "
+                f"{len(self._param_registry.entries)} trainable params, "
+                f"{self._param_registry.total_trainable_params} elements, "
+                f"{len(self._param_registry.state_dict_keys)} state_dict keys"
+            )
+
+        # Save the global model going INTO this round. Avoids ambiguity around
+        # self.prev_global_parameters (which is None in round 1 and otherwise
+        # holds the SELECTED-at-end-of-previous-round params).
+        self._round_global_parameters = parameters
+
+        # Save the reference clean deltas for this round (for cosine_to_reference
+        # features). Shape: [num_refs, D_params] in net.parameters() ordering.
+        self._round_ref_deltas_flat = ref_deltas
+
+        # Snoop attack mode / type from on_fit_config_fn so we can write metadata
+        # without needing server_app changes.
+        cfg_template = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
+        self._round_attack_mode = str(cfg_template.get("backdoor-attack-mode", "none"))
+        self._round_attack_type = str(cfg_template.get("backdoor-attack-type", "none"))
+
+        # Stash sampled and malicious ids
+        self._round_sampled_ids = [str(x) for x in sampled_ids]
+        self._round_malicious_ids_set = set(str(x) for x in malicious_ids)
 
         return fit_ins_list
 
@@ -481,9 +540,184 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         # ---- Maintain your existing behavior ----
         self.prev_global_parameters = selected_params
 
+        # ---- Extract per-update structural features and write to CSV ----
+        # Done after Krum scoring so metadata can include krum_score, krum_rank,
+        # and selected_by_aggregator. Defensive wrap: extraction failures MUST
+        # NOT break aggregation.
+        try:
+            self._extract_and_log_features(
+                rnd=rnd,
+                results=results,
+                client_ids=client_ids,
+                client_proxies=client_proxies,
+                scores=scores,
+                selected_cid=selected_cid,
+            )
+        except Exception as e:
+            print(f"[Extractor][Round {rnd}] Feature extraction failed: "
+                  f"{type(e).__name__}: {e}")
+            traceback.print_exc()
+
         # ---- Return in Flower-compatible format ----
         # Use Flower’s expected return type: (Parameters, metrics)
         return selected_params, {}
+
+    def _extract_and_log_features(
+        self,
+        rnd: int,
+        results,
+        client_ids: List[str],
+        client_proxies: List[ClientProxy],
+        scores: Dict[str, float],
+        selected_cid: str,
+    ) -> None:
+        """
+        Compute per-update structural features for every client this round and
+        append one CSV row per client.
+
+        Inputs are taken from aggregate_fit's already-computed state; we re-do
+        the per-client work in the trainable-param space (BN running stats
+        excluded). This costs ~130ms/client on CPU (mostly layer4 SVDs).
+        """
+        if self._param_registry is None:
+            print(f"[Extractor][Round {rnd}] No registry, skipping.")
+            return
+
+        registry = self._param_registry
+
+        # ---- Build the global state-dict (trainable view) for this round ----
+        # _round_global_parameters is captured in configure_fit. Falls back to
+        # prev_global_parameters or initial parameters defensively.
+        global_params = self._round_global_parameters
+        if global_params is None:
+            global_params = self.prev_global_parameters
+        if global_params is None:
+            global_params = self._initial_parameters_fallback
+        if global_params is None:
+            print(f"[Extractor][Round {rnd}] No global parameters available, skipping.")
+            return
+
+        global_nds = parameters_to_ndarrays(global_params)
+        global_sd_train = nds_to_trainable_state_dict(
+            global_nds, registry.state_dict_keys
+        )
+
+        # ---- Build per-client delta dicts (trainable view) ----
+        per_client: List[Dict[str, Any]] = []
+        for client_proxy, fit_res in results:
+            cid = client_proxy.cid
+            try:
+                client_nds = parameters_to_ndarrays(fit_res.parameters)
+                client_sd = nds_to_trainable_state_dict(
+                    client_nds, registry.state_dict_keys
+                )
+                delta_sd = state_dict_delta(client_sd, global_sd_train)
+            except Exception as e:
+                print(f"[Extractor][Round {rnd}] Skipping CID={cid}: {e}")
+                continue
+            per_client.append({
+                "cid": cid,
+                "proxy": client_proxy,
+                "fit_res": fit_res,
+                "delta_sd": delta_sd,
+            })
+
+        if not per_client:
+            return
+
+        # ---- Round-mean delta (over the trainable param space) ----
+        round_mean = mean_delta_per_key(c["delta_sd"] for c in per_client)
+
+        # ---- Reference clean delta: mean of the per-round ref_deltas ----
+        # ref_deltas is laid out in net.parameters() ordering (same as registry)
+        # so we can slice it directly back into per-key tensors.
+        reference_delta_per_key: Optional[Dict[str, "torch.Tensor"]] = None
+        if self._round_ref_deltas_flat is not None and len(self._round_ref_deltas_flat) > 0:
+            try:
+                ref_mean_flat = torch.from_numpy(
+                    self._round_ref_deltas_flat.mean(axis=0)
+                ).float()
+                if ref_mean_flat.numel() == registry.total_trainable_params:
+                    reference_delta_per_key = flat_param_vec_to_per_key_dict(
+                        ref_mean_flat, registry
+                    )
+                else:
+                    # Size mismatch: ref_deltas were computed over a different
+                    # param space. Skip reference features but don't crash.
+                    print(
+                        f"[Extractor][Round {rnd}] ref_deltas size "
+                        f"{ref_mean_flat.numel()} != trainable {registry.total_trainable_params}; "
+                        "skipping reference features."
+                    )
+            except Exception as e:
+                print(f"[Extractor][Round {rnd}] reference build failed: {e}")
+
+        # ---- Compute Krum ranks (lower score = better; rank 1 = winner) ----
+        sorted_cids = sorted(scores, key=scores.get)
+        rank_of = {cid: i + 1 for i, cid in enumerate(sorted_cids)}
+
+        # ---- Iterate clients, extract features, write rows ----
+        for entry in per_client:
+            cid = entry["cid"]
+            proxy = entry["proxy"]
+            fit_res = entry["fit_res"]
+            delta_sd = entry["delta_sd"]
+
+            partition_id = self._get_partition_id(proxy)
+            is_malicious = str(cid) in self._round_malicious_ids_set
+            client_metrics = dict(getattr(fit_res, "metrics", {}) or {})
+
+            # Determine effective attack_type for this client. Honest clients
+            # get "none" regardless of round-level attack_type setting; only
+            # malicious clients in attack rounds use the configured attack type.
+            effective_attack_type = (
+                self._round_attack_type if is_malicious else "none"
+            )
+
+            metadata = {
+                "simulation_id": self.simulation_id,
+                "round": rnd,
+                "cid": str(cid),
+                "partition_id": int(partition_id) if partition_id is not None else -1,
+                "malicious_flag": int(is_malicious),
+                "attack_mode": self._round_attack_mode,
+                "attack_type": effective_attack_type,
+                # From fit_res:
+                "local_data_size": int(getattr(fit_res, "num_examples", 0)),
+                # From client-reported metrics (require client_app patch to be populated):
+                "local_epochs": client_metrics.get("local_epochs"),
+                "local_lr": client_metrics.get("local_lr"),
+                "scale_factor": client_metrics.get("scale_factor"),
+                # Aggregator state:
+                "selected_by_aggregator": int(str(cid) == str(selected_cid)),
+                "krum_score": float(scores.get(cid, float("nan"))),
+                "krum_rank": int(rank_of.get(cid, -1)),
+                # Constants for this experimental setup; harmless to denormalize
+                # so each row is self-describing.
+                "dirichlet_alpha": 0.9,
+                "target_label": 2,
+                "aggregation_method": str(self.aggregation_method),
+                "num_clients": int(self.num_clients),
+            }
+
+            try:
+                features = extract_per_update_features(
+                    client_delta_per_key=delta_sd,
+                    round_mean_delta_per_key=round_mean,
+                    registry=registry,
+                    reference_delta_per_key=reference_delta_per_key,
+                )
+            except Exception as e:
+                print(f"[Extractor][Round {rnd}][CID={cid}] feature compute failed: {e}")
+                continue
+
+            try:
+                append_per_update_features(
+                    metadata=metadata,
+                    features=features,
+                )
+            except Exception as e:
+                print(f"[Extractor][Round {rnd}][CID={cid}] CSV write failed: {e}")
 
     def record_centralized_eval(self, rnd: int, loss: float, mta: float, asr: float) -> None:
         self.central_mta_history.append(mta)
