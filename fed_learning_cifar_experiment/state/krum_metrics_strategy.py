@@ -24,6 +24,9 @@ from fed_learning_cifar_experiment.utils.metrics_extractor import (
     flat_param_vec_to_per_key_dict,
     mean_delta_per_key,
     extract_per_update_features,
+    build_leave_one_out_means,
+    build_stage_projection_bases,
+    ref_deltas_flat_to_per_key_list,
 )
 
 from flwr.common import parameters_to_ndarrays
@@ -628,10 +631,18 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
         # ---- Round-mean delta (over the trainable param space) ----
         round_mean = mean_delta_per_key(c["delta_sd"] for c in per_client)
 
+        # ---- Leave-one-out means per client (for cos_to_mean_leave_one_out) ----
+        # O(n_clients * D) compute; trivial relative to SVDs.
+        client_deltas_list = [c["delta_sd"] for c in per_client]
+        loo_means = build_leave_one_out_means(client_deltas_list)
+        for i, c in enumerate(per_client):
+            c["loo_mean"] = loo_means[i]
+
         # ---- Reference clean delta: mean of the per-round ref_deltas ----
         # ref_deltas is laid out in net.parameters() ordering (same as registry)
         # so we can slice it directly back into per-key tensors.
         reference_delta_per_key: Optional[Dict[str, "torch.Tensor"]] = None
+        ref_deltas_per_key_list: Optional[List[Dict[str, "torch.Tensor"]]] = None
         if self._round_ref_deltas_flat is not None and len(self._round_ref_deltas_flat) > 0:
             try:
                 ref_mean_flat = torch.from_numpy(
@@ -641,9 +652,11 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                     reference_delta_per_key = flat_param_vec_to_per_key_dict(
                         ref_mean_flat, registry
                     )
+                    # Also build the per-ref list for projection bases
+                    ref_deltas_per_key_list = ref_deltas_flat_to_per_key_list(
+                        self._round_ref_deltas_flat, registry
+                    )
                 else:
-                    # Size mismatch: ref_deltas were computed over a different
-                    # param space. Skip reference features but don't crash.
                     print(
                         f"[Extractor][Round {rnd}] ref_deltas size "
                         f"{ref_mean_flat.numel()} != trainable {registry.total_trainable_params}; "
@@ -651,6 +664,21 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                     )
             except Exception as e:
                 print(f"[Extractor][Round {rnd}] reference build failed: {e}")
+
+        # ---- Fit per-stage projection bases from this round's refs ----
+        # Principle 2: cross-layer gradient-flow consistency. Bases are fit
+        # fresh each round because the global model has shifted and the
+        # honest delta distribution shifts with it. Uses the SAME ref_deltas
+        # that are sent to clients — the attacker already sees these.
+        stage_proj_bases: Optional[Dict[str, "torch.Tensor"]] = None
+        stage_proj_ref_means: Optional[Dict[str, "torch.Tensor"]] = None
+        if ref_deltas_per_key_list is not None:
+            try:
+                stage_proj_bases, stage_proj_ref_means = build_stage_projection_bases(
+                    ref_deltas_per_key_list, registry, k=3
+                )
+            except Exception as e:
+                print(f"[Extractor][Round {rnd}] projection basis fit failed: {e}")
 
         # ---- Compute Krum ranks (lower score = better; rank 1 = winner) ----
         sorted_cids = sorted(scores, key=scores.get)
@@ -662,6 +690,7 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
             proxy = entry["proxy"]
             fit_res = entry["fit_res"]
             delta_sd = entry["delta_sd"]
+            loo_mean = entry["loo_mean"]
 
             partition_id = self._get_partition_id(proxy)
             is_malicious = str(cid) in self._round_malicious_ids_set
@@ -706,6 +735,9 @@ class SaveKrumMetricsStrategy(fl.server.strategy.Krum):
                     round_mean_delta_per_key=round_mean,
                     registry=registry,
                     reference_delta_per_key=reference_delta_per_key,
+                    leave_one_out_mean_per_key=loo_mean,
+                    stage_projection_bases=stage_proj_bases,
+                    stage_projection_ref_means=stage_proj_ref_means,
                 )
             except Exception as e:
                 print(f"[Extractor][Round {rnd}][CID={cid}] feature compute failed: {e}")
