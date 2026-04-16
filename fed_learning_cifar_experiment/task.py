@@ -416,6 +416,125 @@ def train_backdoor(net, training_data, epochs, device, lr=0.01):
     final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
     return avg_training_loss, final_vec
 
+def train_neurotoxin(
+    net,
+    training_data,
+    device,
+    init_vec: torch.Tensor,
+    benign_grad_approx: torch.Tensor = None,
+    epochs: int = 40,
+    lr: float = 0.01,
+    mask_ratio: float = 0.01,
+    scale_factor: float = 1.0,
+):
+    """
+    Neurotoxin attack (Zhang et al., ICML 2022).
+
+    Trains on a poisoned dataset but projects the gradient at every step onto
+    the bottom-(1 - mask_ratio) coordinates of the benign gradient, i.e. it
+    avoids the 'heavy hitter' coordinates that benign clients are most likely
+    to update. This makes the injected backdoor occupy a quiet subspace that
+    is seldom overwritten during subsequent benign training rounds, dramatically
+    increasing durability compared to plain train-and-scale.
+
+    Args:
+        net:                Module already loaded with the current global weights.
+        training_data:      Poisoned DataLoader (collate_with_backdoor applied).
+        device:             Torch device.
+        init_vec:           Flattened global model at the start of this round (CPU).
+        benign_grad_approx: 1-D tensor approximating the benign gradient direction,
+                            typically (global_t - global_{t-1}).  If None (round 1),
+                            no projection is applied and the attack degenerates to
+                            standard backdoor training.
+        epochs:             Number of local poisoned training epochs (paper uses 40).
+        lr:                 Learning rate (paper uses the same as the baseline attack).
+        mask_ratio:         Fraction of coordinates to suppress (top-k% by magnitude).
+                            Paper's best: 0.01 (1%). Tune in [0.001, 0.05].
+        scale_factor:       Optional post-training boosting of the delta. Default 1.0
+                            (no boosting — neurotoxin relies on durability, not magnitude).
+                            Set >1 only if pairing with a scale-based evasion strategy.
+
+    Returns:
+        (avg_loss, final_vec): average CE loss over training, final parameter vector
+                               on CPU ready to be loaded with vector_to_parameters.
+    """
+    net.to(device)
+    net.train()
+
+    # Restore init_vec into the network (caller may or may not have done this)
+    g = init_vec.detach().to(device)
+    vector_to_parameters(g, net.parameters())
+
+    # ------------------------------------------------------------------
+    # Build the coordinate mask once from the benign gradient approximation.
+    # mask[i] = True  →  coordinate i is a heavy hitter → zero it out.
+    # mask is None    →  no projection (first round fallback).
+    # ------------------------------------------------------------------
+    mask = None
+    if benign_grad_approx is not None:
+        abs_benign = benign_grad_approx.abs().to(device)
+        num_params = abs_benign.numel()
+        k = max(1, int(mask_ratio * num_params))
+        # topk returns the k LARGEST values; those are the coords to suppress.
+        top_vals, top_indices = torch.topk(abs_benign, k)
+        mask = torch.zeros(num_params, dtype=torch.bool, device=device)
+        mask[top_indices] = True
+        del abs_benign  # free immediately — can be ~270k elements
+
+    criterion = nn.CrossEntropyLoss()
+    # Match train_backdoor: SGD + momentum, no weight decay, cosine LR
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=0.0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(1, len(training_data) * epochs)
+    )
+
+    running_loss = 0.0
+    num_steps = 0
+
+    for _ in range(epochs):
+        for batch in training_data:
+            if isinstance(batch, dict):
+                images, labels = batch["img"], batch["label"]
+            else:
+                images, labels = batch
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+
+            optimizer.zero_grad(set_to_none=True)
+            outputs = net(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+
+            # -------------------------------------------------------
+            # Core Neurotoxin step: zero gradients at heavy-hitter
+            # coordinates so those params are not moved this step.
+            # This is PGD projected onto the bottom-k% subspace.
+            # -------------------------------------------------------
+            if mask is not None:
+                offset = 0
+                for param in net.parameters():
+                    if param.grad is not None:
+                        numel = param.numel()
+                        param_mask = mask[offset: offset + numel].view(param.shape)
+                        param.grad.data[param_mask] = 0.0
+                        offset += numel
+
+            optimizer.step()
+            scheduler.step()
+            running_loss += loss.item()
+            num_steps += 1
+
+    avg_loss = running_loss / max(num_steps, 1)
+
+    # Optional post-hoc scaling of the delta (disabled by default)
+    final_vec = parameters_to_vector(net.parameters()).detach().cpu()
+    if scale_factor != 1.0:
+        delta = final_vec - init_vec.cpu()
+        final_vec = init_vec.cpu() + scale_factor * delta
+
+    return avg_loss, final_vec
+
+
 def train_constrain_and_scale(
     net,
     training_data,

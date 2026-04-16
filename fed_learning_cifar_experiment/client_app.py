@@ -12,7 +12,8 @@ from flwr.common import Parameters, parameters_to_ndarrays
 from fed_learning_cifar_experiment.task import (
     get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
     get_basic_cnn_model, train_backdoor, krum_safe_scale,
-    train_constrain_and_scale_krum_proxy, build_reference_clean_deltas
+    train_constrain_and_scale_krum_proxy, build_reference_clean_deltas,
+    train_neurotoxin,
 )
 from fed_learning_cifar_experiment.utils.evaluate_attack import evaluate_asr
 
@@ -186,6 +187,56 @@ class FlowerClient(NumPyClient):
                     "local_epochs": int(attack_epochs),
                     "local_lr": float(learning_rate),
                     "scale_factor": float(eta),
+                }
+
+            elif attack_type == "neurotoxin":
+                # ------------------------------------------------------------------
+                # Neurotoxin (Zhang et al., ICML 2022)
+                # ------------------------------------------------------------------
+                # Benign gradient approximation: the aggregated update the server
+                # applied last round is (current_global - prev_global).  This is a
+                # good proxy for the direction benign clients collectively push, so
+                # we suppress those coordinates in our poisoned gradient steps.
+                # If prev_global_vec is None (first round) the function falls back
+                # to unconstrained backdoor training automatically.
+                attack_epochs = 40
+                mask_ratio = float(config.get("neurotoxin-mask-ratio", 0.01))
+                neurotoxin_scale = float(config.get("neurotoxin-scale-factor", 1.0))
+
+                benign_grad_approx = None
+                if prev_global_vec is not None:
+                    # shape: [D], CPU — difference of consecutive global models
+                    benign_grad_approx = (init_vec - prev_global_vec).cpu()
+
+                train_loss, final_vec = train_neurotoxin(
+                    net=self.net,
+                    training_data=self.training_set,
+                    device=self.device,
+                    init_vec=init_vec.cpu(),
+                    benign_grad_approx=benign_grad_approx,
+                    epochs=attack_epochs,
+                    lr=learning_rate,
+                    mask_ratio=mask_ratio,
+                    scale_factor=neurotoxin_scale,
+                )
+
+                delta = final_vec - init_vec.cpu()
+                print(
+                    f"[Round {current_round}] Neurotoxin Client {partition_id} | "
+                    f"mask_ratio={mask_ratio:.4f} | "
+                    f"delta_norm={delta.norm().item():.4f} | "
+                    f"scale={neurotoxin_scale}"
+                )
+
+                vector_to_parameters(final_vec.to(self.device), self.net.parameters())
+                self.prev_global_vec = init_vec.clone()
+                return get_weights(self.net), len(self.training_set.dataset), {
+                    "attack": "neurotoxin",
+                    "train_loss": float(train_loss),
+                    "local_epochs": int(attack_epochs),
+                    "local_lr": float(learning_rate),
+                    "scale_factor": float(neurotoxin_scale),
+                    "mask_ratio": float(mask_ratio),
                 }
 
             else:
