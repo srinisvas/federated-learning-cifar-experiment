@@ -37,6 +37,9 @@ def server_fn(context: Context):
         hardcoded_rounds = [1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56, 61, 66, 71, 76, 81, 86, 91, 96]
         #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
         backdoor_rounds = json.dumps(hardcoded_rounds)
+    if backdoor_attack_mode == "global-attack-first" and backdoor_attack_type == "neurotoxin":
+        hardcoded_rounds = [1, 11, 21, 31, 41, 51, 61, 71, 81, 91]
+        backdoor_rounds = json.dumps(hardcoded_rounds)
     # Initialize model parameter
 
     model = get_resnet_cnn_model()
