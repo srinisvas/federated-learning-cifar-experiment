@@ -88,6 +88,39 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         self._round_sampled_ids: List[str] = []
         self._round_malicious_ids_set: set = set()
 
+        # ------------------------------------------------------------------
+        # Static partition split — fixed for the lifetime of this experiment.
+        #
+        # backdoor_partition_ids: the 10 partitions that will always attack
+        #   (when sampled).  Pass explicitly for reproducibility; if omitted,
+        #   10 are drawn at random from range(num_clients).
+        # benign_partition_ids:   the remaining 90.
+        #
+        # Guarantee: every round samples exactly 1 backdoor partition and
+        # (sample_size - 1) benign partitions, so malicious_flag is always
+        # truthful and the same attacker identities recur across rounds.
+        # ------------------------------------------------------------------
+        provided = kwargs.pop("backdoor_partition_ids", None)
+        if provided is not None:
+            self.backdoor_partition_ids: List[int] = list(provided)
+        else:
+            self.backdoor_partition_ids = random.sample(
+                range(int(num_clients)), min(10, int(num_clients))
+            )
+        self.benign_partition_ids: List[int] = [
+            p for p in range(int(num_clients))
+            if p not in set(self.backdoor_partition_ids)
+        ]
+
+        # Reverse map: partition_id -> ClientProxy (populated on first round).
+        self._partition_to_proxy: Dict[int, ClientProxy] = {}
+        self._partition_cache_built: bool = False
+
+        print(
+            f"[Strategy] Backdoor partitions ({len(self.backdoor_partition_ids)}): "
+            f"{sorted(self.backdoor_partition_ids)}"
+        )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -131,19 +164,65 @@ class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
         client_manager: ClientManager,
     ) -> List[Tuple[ClientProxy, FitIns]]:
 
-        num_available = len(client_manager.all())
-        sample_size, min_num = self.num_fit_clients(num_available)
-        sampled_clients = list(client_manager.sample(sample_size, min_num))
-        sampled_ids = [c.cid for c in sampled_clients]
+        all_client_map = client_manager.all()          # cid -> ClientProxy
+        sample_size, _ = self.num_fit_clients(len(all_client_map))
 
-        num_malicious = min(self.num_of_malicious_clients_per_round, len(sampled_ids))
-        malicious_ids = random.sample(sampled_ids, num_malicious)
+        # ------------------------------------------------------------------
+        # One-time partition cache build (round 1 only).
+        # Calls get_properties on every supernode to establish the
+        # cid <-> partition_id mapping, then inverts it for O(1) lookup.
+        # ------------------------------------------------------------------
+        if not self._partition_cache_built:
+            print(f"[Strategy][Round {server_round}] Building partition cache "
+                  f"for {len(all_client_map)} supernodes...")
+            for proxy in all_client_map.values():
+                self._get_partition_id(proxy)          # populates _cid_to_partition
+            # Build reverse map: partition_id -> proxy
+            self._partition_to_proxy = {
+                pid: next(
+                    p for p in all_client_map.values()
+                    if self._cid_to_partition.get(p.cid) == pid
+                )
+                for pid in self._cid_to_partition.values()
+            }
+            self._partition_cache_built = True
+            print(f"[Strategy] Partition cache built: "
+                  f"{len(self._partition_to_proxy)} entries.")
+
+        # ------------------------------------------------------------------
+        # Stratified sampling: 1 from backdoor pool + (sample_size-1) from
+        # benign pool.  Both pools are drawn without replacement each round.
+        # ------------------------------------------------------------------
+        backdoor_proxies = [
+            self._partition_to_proxy[p]
+            for p in self.backdoor_partition_ids
+            if p in self._partition_to_proxy
+        ]
+        benign_proxies = [
+            self._partition_to_proxy[p]
+            for p in self.benign_partition_ids
+            if p in self._partition_to_proxy
+        ]
+
+        # Exactly 1 attacker per round (extend to num_of_malicious_clients_per_round
+        # if desired — keep it 1 for now to maximise temporal signal per partition).
+        num_attackers = min(self.num_of_malicious_clients_per_round, len(backdoor_proxies))
+        sampled_backdoor = random.sample(backdoor_proxies, num_attackers)
+        sampled_benign   = random.sample(benign_proxies, sample_size - num_attackers)
+
+        sampled_clients = sampled_backdoor + sampled_benign
+        random.shuffle(sampled_clients)                # avoid positional bias
+
+        sampled_ids  = [c.cid for c in sampled_clients]
+        malicious_ids = [c.cid for c in sampled_backdoor]
 
         self._round_malicious_ids_set = set(str(x) for x in malicious_ids)
         self._round_sampled_ids = [str(x) for x in sampled_ids]
 
-        print(f"Sampled clients for round {server_round}: {sampled_ids}")
-        print(f"Malicious clients for round {server_round}: {malicious_ids}")
+        mal_partitions = [self._cid_to_partition.get(cid, -1) for cid in malicious_ids]
+        print(f"[Round {server_round}] Sampled: {sampled_ids}")
+        print(f"[Round {server_round}] Malicious CIDs: {malicious_ids} "
+              f"(partitions: {mal_partitions})")
 
         # ---- Build reference clean deltas (same as Krum strategy) ----
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

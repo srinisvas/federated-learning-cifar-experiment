@@ -29,21 +29,33 @@ def server_fn(context: Context):
     num_of_malicious_clients_per_round = context.run_config.get("num-malicious-clients-per-round", 1)
     attacker_selection_mode = context.run_config.get("attacker-selection-mode", "random").lower()
     malicious_client_id = context.run_config.get("malicious-client-id", 2)
-    if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "train-and-scale":
-        hardcoded_rounds = [1]
-        #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
-        backdoor_rounds = json.dumps(hardcoded_rounds)
-    if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "constrain-and-scale":
-        hardcoded_rounds = [1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56, 61, 66, 71, 76, 81, 86, 91, 96]
-        #backdoor_rounds = json.dumps(random.sample(range(1, num_rounds + 1), num_of_malicious_clients))
-        backdoor_rounds = json.dumps(hardcoded_rounds)
-    if backdoor_attack_mode == "global-random-attack" and backdoor_attack_type == "neurotoxin":
-        hardcoded_rounds = [1, 11, 21, 31, 41, 51, 61, 71, 81, 91]
-        backdoor_rounds = json.dumps(hardcoded_rounds)
-    else:
-        backdoor_rounds = json.dumps([1])
-        print(f"[WARNING] Unhandled backdoor_attack_type '{backdoor_attack_type}' "
-              f"for global-random-attack; defaulting backdoor_rounds=[1].")
+
+    # Optional fixed backdoor partition list.  Pass as a JSON array in run-config:
+    #   backdoor-partition-ids='[5,23,67,12,44,78,3,91,50,16]'
+    # If omitted, the strategy draws 10 at random (still fixed for the run).
+    _raw_bdp = context.run_config.get("backdoor-partition-ids", None)
+    backdoor_partition_ids = json.loads(_raw_bdp) if _raw_bdp else None
+    # backdoor_rounds must be defined before on_fit_config_fn closes over it,
+    # regardless of attack type — otherwise any unhandled type causes a NameError.
+    backdoor_rounds = json.dumps([])  # safe default; overridden below
+
+    if backdoor_attack_mode == "global-random-attack":
+        if backdoor_attack_type == "train-and-scale":
+            backdoor_rounds = json.dumps([1])
+        elif backdoor_attack_type == "constrain-and-scale":
+            backdoor_rounds = json.dumps(
+                [1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56, 61, 66, 71, 76, 81, 86, 91, 96]
+            )
+        elif backdoor_attack_type == "neurotoxin":
+            # Inject every 5 rounds: enough events to measure inter-attack ASR decay.
+            backdoor_rounds = json.dumps(list(range(1, int(num_rounds) + 1, 5)))
+        else:
+            backdoor_rounds = json.dumps([1])
+            print(f"[WARNING] Unhandled backdoor_attack_type '{backdoor_attack_type}' "
+                  f"for global-random-attack; defaulting backdoor_rounds=[1].")
+
+    if backdoor_attack_mode == "global-attack-first" and backdoor_attack_type == "neurotoxin":
+        backdoor_rounds = json.dumps([1, 11, 21, 31, 41, 51, 61, 71, 81, 91])
     # Initialize model parameter
 
     model = get_resnet_cnn_model()
@@ -98,13 +110,14 @@ def server_fn(context: Context):
             evaluate_fn=get_evaluate_fn(model=get_resnet_cnn_model().to(device), test_data=testing_data),
             initial_parameters=parameters,
             on_fit_config_fn=on_fit_config_fn,
-            simulation_id = simulation_id,
-            num_clients = num_clients,
-            num_rounds = num_rounds,
-            aggregation_method = aggregation_method,
-            backdoor_attack_mode = backdoor_attack_mode,
-            num_of_malicious_clients = num_of_malicious_clients,
-            num_of_malicious_clients_per_round = num_of_malicious_clients_per_round
+            simulation_id=simulation_id,
+            num_clients=num_clients,
+            num_rounds=num_rounds,
+            aggregation_method=aggregation_method,
+            backdoor_attack_mode=backdoor_attack_mode,
+            num_of_malicious_clients=num_of_malicious_clients,
+            num_of_malicious_clients_per_round=num_of_malicious_clients_per_round,
+            backdoor_partition_ids=backdoor_partition_ids,
         )
     elif aggregation_method == "fedavg-cluster-defense":
         strategy = SaveFedAvgMetricsClusterDefenseStrategy(
